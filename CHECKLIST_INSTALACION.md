@@ -10,7 +10,7 @@ La hace Tecnología junto con el gerente. Tiempo estimado: 30 minutos. Marca cad
 - [ ] Python 3.10 o superior: `python --version` (en macOS, `python3 --version`).
   En Windows, al instalarlo, marca **"Add python.exe to PATH"**.
 - [ ] Git instalado: `git --version`. En Windows, desde https://git-scm.com, con las opciones por defecto.
-- [ ] **Decididas las API keys.** Se recomienda **una key por hotel (Zentra Balta, Zentra Plaza y Zentra San José) para esta PC**, creada en Cloudbeds con una **cuenta institucional** y solo los scopes de lectura de la sección D del registro. Así se puede revocar sin afectar a otras instalaciones. Anótalas en [REGISTRO_ACCESOS.md](REGISTRO_ACCESOS.md).
+- [ ] **Decididas las API keys.** Se recomienda **una key por hotel (Zentra Balta, Zentra Plaza y Zentra San José) para esta PC**, creada en Cloudbeds con una **cuenta institucional** y solo los scopes mínimos de [REGISTRO_ACCESOS.md](REGISTRO_ACCESOS.md). Así se puede revocar sin afectar a otras instalaciones. Anótalas en `REGISTRO_ACCESOS.local.md` en la PC de Tecnología. Ese archivo no se sube al repositorio.
 
 ## B. Descargar el proyecto con git (sin secretos)
 

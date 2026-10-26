@@ -15,3 +15,6 @@ htmlcov/
 # Logs
 logs/
 *.log
+
+# Registro de accesos real (datos internos; la plantilla pública es REGISTRO_ACCESOS.md)
+REGISTRO_ACCESOS.local.md

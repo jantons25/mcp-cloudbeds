@@ -74,6 +74,10 @@ TOOLS = [
     (server.ingresos_periodo, {}),
 ]
 TOOL_IDS = [t.__name__ for t, _ in TOOLS]
+# Herramientas que aceptan hotel="red" (fase 4); el resto son de un solo hotel.
+RED_TOOLS = {"estado_hotel", "buscar_reservas", "resumen_dia", "resumen_periodo", "ingresos_periodo"}
+UNO = [(t, k) for t, k in TOOLS if t.__name__ not in RED_TOOLS]
+UNO_IDS = [t.__name__ for t, _ in UNO]
 
 
 @pytest.mark.parametrize(("tool", "kwargs"), TOOLS, ids=TOOL_IDS)
@@ -85,7 +89,7 @@ async def test_sin_hotel_con_varios_pide_elegir_sin_llamar_api(registry, api, to
     assert route.call_count == 0
 
 
-@pytest.mark.parametrize(("tool", "kwargs"), TOOLS, ids=TOOL_IDS)
+@pytest.mark.parametrize(("tool", "kwargs"), UNO, ids=UNO_IDS)
 async def test_red_en_consulta_de_un_hotel(registry, api, tool, kwargs):
     route = api.route()
     out = await tool(**kwargs, hotel="la red")

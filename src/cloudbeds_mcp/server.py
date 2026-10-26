@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -102,6 +102,70 @@ _CATALOG = _catalog_at_import()
 HotelUno = Annotated[
     str | None, Field(description=descripcion_desde_catalogo(_CATALOG, admite_red=False), max_length=100)
 ]
+HotelRed = Annotated[
+    str | None, Field(description=descripcion_desde_catalogo(_CATALOG, admite_red=True), max_length=100)
+]
+
+Consulta = Callable[[CloudbedsClient, bool], Awaitable[dict[str, Any]]]
+Merge = Callable[[dict[str, dict[str, Any]]], dict[str, Any]]
+
+
+async def _run(hotel: str | None, consulta: Consulta, merge: Merge | None = None) -> str:
+    """Ejecuta `consulta(client, es_red)` en un hotel o, si se pide la red, en todos en paralelo.
+
+    En la red, el fallo de un hotel se informa en su entrada y no detiene a los demás; el
+    total de la red solo incluye a los hoteles que respondieron y lo advierte.
+    """
+    registry = _get_registry()
+    if not (registry.multi and registry.es_red(hotel)):
+        client = registry.client(hotel)
+        return _out(client, await consulta(client, False))
+
+    clients = registry.clients(hotel)
+    results = await asyncio.gather(*(consulta(c, True) for c in clients), return_exceptions=True)
+    por_hotel: dict[str, dict[str, Any]] = {}
+    ok: dict[str, dict[str, Any]] = {}
+    fuera: list[str] = []
+    for client, result in zip(clients, results):
+        s = client.settings
+        nombre = s.hotel_name or s.hotel_alias
+        if isinstance(result, _ERRORS):
+            por_hotel[s.hotel_alias] = {"nombre": nombre, "error": _error(result)}
+            fuera.append(f"{nombre} (error al consultar)")
+        elif isinstance(result, BaseException):
+            raise result
+        else:
+            por_hotel[s.hotel_alias] = {"nombre": nombre, **result}
+            ok[s.hotel_alias] = result
+    fuera += [f"{h.nombre or h.alias} (sin API key en esta PC)" for h in registry.no_disponibles()]
+
+    out: dict[str, Any] = {
+        "red": {"hoteles_incluidos": [por_hotel[a]["nombre"] for a in ok], "hoteles_no_incluidos": fuera},
+    }
+    if merge and ok:
+        out["total_red"] = merge(ok)
+    out["hoteles"] = por_hotel
+    if fuera:
+        out["advertencia"] = f"El total de la red NO incluye: {', '.join(fuera)}. Menciónalo al responder."
+    return fmt.to_json(out)
+
+
+async def _room_units(client: CloudbedsClient) -> int | None:
+    """Habitaciones del hotel (suma de roomTypeUnits). Se guarda un día por hotel."""
+    key = (client.settings.hotel_alias, _today(client.settings.tz))
+    cache = _get_registry().cache
+    if key not in cache:
+        tipos = await client.get_all("getRoomTypes", {"propertyIDs": client.settings.property_id})
+        cache[key] = sum(int(t.get("roomTypeUnits") or 0) for t in tipos["data"]) or None
+    return cache[key]
+
+
+async def _room_units_or_none(client: CloudbedsClient) -> int | None:
+    """Para la ocupación de la red: si falla el inventario, se omite el % de la red, no el hotel."""
+    try:
+        return await _room_units(client)
+    except CloudbedsError:
+        return None
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -180,26 +244,33 @@ def _fecha_param(desc: str) -> object:
         "ocupación, in-house, y llegadas/salidas PENDIENTES (las del día que aún no hicieron "
         "check-in/check-out). Para el TOTAL de llegadas o salidas del día (incluidas las ya "
         "realizadas) usa además buscar_reservas con checkin_desde=checkin_hasta=fecha (o "
-        "checkout_desde=checkout_hasta=fecha) y explica ambas cifras."
+        "checkout_desde=checkout_hasta=fecha) y explica ambas cifras. Con hotel='red' devuelve "
+        "cada hotel y el total de la red."
     ),
     annotations=READ_ONLY,
     structured_output=False,
 )
 async def estado_hotel(
     fecha: Annotated[str | None, _fecha_param("Fecha a consultar; si se omite, hoy.")] = None,
-    hotel: HotelUno = None,
+    hotel: HotelRed = None,
 ) -> str:
     try:
         dia_param = _parse_fecha(fecha, "consulta")
     except ValueError as exc:
         return str(exc)
-    try:
-        client = _get_client(hotel)
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
         dia = dia_param or _today(client.settings.tz)
         body = await client.get(
             "getDashboard", {"propertyID": client.settings.property_id, "date": dia.isoformat()}
         )
-        return _out(client, fmt.dashboard(body.get("data") or {}, dia.isoformat()))
+        out = fmt.dashboard(body.get("data") or {}, dia.isoformat())
+        if red:
+            out["habitaciones_hotel"] = await _room_units_or_none(client)
+        return out
+
+    try:
+        return await _run(hotel, consulta, agg.merge_dashboards)
     except _ERRORS as exc:
         return _error(exc)
 
@@ -215,7 +286,9 @@ EstadoReserva = Literal["not_confirmed", "confirmed", "canceled", "checked_in", 
         "check-in, rango de fecha de check-out y apellido del huésped principal. Estados: "
         "not_confirmed=pendiente, confirmed=confirmada, canceled=cancelada, checked_in=en casa, "
         "checked_out=salió, no_show=no se presentó. Para las llegadas de un día usa "
-        "checkin_desde=checkin_hasta=ese día; para salidas, checkout_desde=checkout_hasta."
+        "checkin_desde=checkin_hasta=ese día; para salidas, checkout_desde=checkout_hasta. Con "
+        "hotel='red' busca en todos los hoteles (útil para '¿en qué hotel está el Sr. Pérez?'); "
+        "max_resultados se aplica a cada hotel."
     ),
     annotations=READ_ONLY,
     structured_output=False,
@@ -232,7 +305,7 @@ async def buscar_reservas(
     max_resultados: Annotated[
         int, Field(description="Máximo de reservas a devolver (1-500). Por defecto 50.", ge=1, le=500)
     ] = 50,
-    hotel: HotelUno = None,
+    hotel: HotelRed = None,
 ) -> str:
     try:
         ci_desde = _parse_fecha(checkin_desde, "check-in desde")
@@ -243,8 +316,8 @@ async def buscar_reservas(
         _check_range(co_desde, co_hasta, "check-out")
     except ValueError as exc:
         return str(exc)
-    try:
-        client = _get_client(hotel)
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
         params = {
             "propertyID": client.settings.property_id,
             "status": estado,
@@ -261,7 +334,14 @@ async def buscar_reservas(
         out = {"cantidad": len(reservas), "total_en_cloudbeds": result["total"], "truncado": result["truncado"], "reservas": reservas}
         if result["truncado"]:
             out["nota"] = "Hay más reservas que las mostradas; aumenta max_resultados o acota los filtros."
-        return _out(client, out)
+        return out
+
+    def total(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        return {"cantidad": sum(r["cantidad"] for r in results.values()),
+                "hoteles_con_resultados": [a for a, r in results.items() if r["cantidad"]]}
+
+    try:
+        return await _run(hotel, consulta, total)
     except _ERRORS as exc:
         return _error(exc)
 
@@ -637,21 +717,22 @@ def _incomplete_note(truncado: bool) -> dict[str, str]:
         "Resumen gerencial de un día (por defecto hoy): ocupación, y llegadas y salidas con su "
         "TOTAL del día, cuántas ya se realizaron y cuántas siguen pendientes, más no-show, "
         "cancelaciones y una lista corta de reservas. Es la mejor herramienta para '¿cómo va el "
-        "día?' o '¿cuántas llegadas/salidas hay hoy?'."
+        "día?' o '¿cuántas llegadas/salidas hay hoy?'. Con hotel='red' devuelve cada hotel y el "
+        "total de la red ('¿cómo va la red hoy?')."
     ),
     annotations=READ_ONLY,
     structured_output=False,
 )
 async def resumen_dia(
     fecha: Annotated[str | None, _fecha_param("Día a resumir; si se omite, hoy.")] = None,
-    hotel: HotelUno = None,
+    hotel: HotelRed = None,
 ) -> str:
     try:
         dia_param = _parse_fecha(fecha, "consulta")
     except ValueError as exc:
         return str(exc)
-    try:
-        client = _get_client(hotel)
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
         dia = (dia_param or _today(client.settings.tz)).isoformat()
         pid = client.settings.property_id
         dash = await client.get("getDashboard", {"propertyID": pid, "date": dia})
@@ -660,9 +741,17 @@ async def resumen_dia(
         dep = await client.get_all("getReservations", {**base, "checkOutFrom": dia, "checkOutTo": dia}, max_results=AGG_MAX_RESULTS)
         out = agg.day_summary(dash.get("data") or {}, arr["data"], dep["data"], dia)
         out.update(_incomplete_note(arr["truncado"] or dep["truncado"]))
-        return _out(client, out)
+        if red:
+            out["habitaciones_hotel"] = await _room_units_or_none(client)
+        return out
+
+    try:
+        return await _run(hotel, consulta, agg.merge_day_summaries)
     except _ERRORS as exc:
         return _error(exc)
+
+
+_UTC = ZoneInfo("UTC")  # solo para validar el periodo antes de consultar; cada hotel usa su zona
 
 
 @mcp.tool(
@@ -672,7 +761,8 @@ async def resumen_dia(
         "estado, por fuente/canal y por tipo de habitación, habitaciones y noches reservadas, "
         "estancia media, cancelaciones y no-show. criterio='checkin' (por defecto) toma las "
         "reservas que LLEGAN en el periodo; criterio='creacion' toma las reservas HECHAS en el "
-        "periodo (producción/pickup). Fechas inclusivas, máximo 366 días."
+        "periodo (producción/pickup). Fechas inclusivas, máximo 366 días. Con hotel='red' "
+        "devuelve cada hotel y el total de la red."
     ),
     annotations=READ_ONLY,
     structured_output=False,
@@ -683,16 +773,15 @@ async def resumen_periodo(
     criterio: Annotated[
         Literal["checkin", "creacion"], Field(description="checkin=llegadas del periodo; creacion=reservas hechas en el periodo.")
     ] = "checkin",
-    hotel: HotelUno = None,
+    hotel: HotelRed = None,
 ) -> str:
     try:
-        client = _get_client(hotel)
-        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
+        _period(fecha_desde, fecha_hasta, _UTC)
     except ValueError as exc:
         return str(exc)
-    except _ERRORS as exc:
-        return _error(exc)
-    try:
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
+        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
         params: dict[str, object] = {"propertyID": client.settings.property_id, "includeAllRooms": True}
         if criterio == "checkin":
             params.update(checkInFrom=desde.isoformat(), checkInTo=hasta.isoformat())
@@ -706,7 +795,10 @@ async def resumen_periodo(
         }
         if criterio == "checkin":
             out["nota"] = "Las noches cuentan la estadía completa de las reservas que llegan en el periodo, aunque salgan después."
-        return _out(client, out)
+        return out
+
+    try:
+        return await _run(hotel, consulta, agg.merge_period_summaries)
     except _ERRORS as exc:
         return _error(exc)
 
@@ -719,7 +811,8 @@ async def resumen_periodo(
         "con impuestos), ingreso neto (sin impuestos, incluye ajustes manuales de precio), ADR, "
         "ocupación, RevPAR y desglose por fuente/canal y por tipo de habitación. Excluye "
         "canceladas y no-show (en Cloudbeds tienen total 0). No incluye extras, pagos ni "
-        "cobros. Máximo 366 días."
+        "cobros. Máximo 366 días. Con hotel='red' devuelve cada hotel y el total de la red "
+        "(los importes solo se suman si todos usan la misma moneda)."
     ),
     annotations=READ_ONLY,
     structured_output=False,
@@ -727,16 +820,15 @@ async def resumen_periodo(
 async def ingresos_periodo(
     fecha_desde: Annotated[str | None, _fecha_param("Primera noche del periodo (incluida).")] = None,
     fecha_hasta: Annotated[str | None, _fecha_param("Última noche del periodo (incluida).")] = None,
-    hotel: HotelUno = None,
+    hotel: HotelRed = None,
 ) -> str:
     try:
-        client = _get_client(hotel)
-        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
+        _period(fecha_desde, fecha_hasta, _UTC)
     except ValueError as exc:
         return str(exc)
-    except _ERRORS as exc:
-        return _error(exc)
-    try:
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
+        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
         pid = client.settings.property_id
         co_from, co_to = agg.stay_query_window(desde, hasta)
         result = await client.get_all(
@@ -745,10 +837,9 @@ async def ingresos_periodo(
             max_results=AGG_MAX_RESULTS,
             concurrency=AGG_CONCURRENCY,
         )
-        tipos = await client.get_all("getRoomTypes", {"propertyIDs": pid})
-        unidades = sum(int(t.get("roomTypeUnits") or 0) for t in tipos["data"]) or None
+        unidades = await _room_units(client)
         currency = next((r.get("propertyCurrency") for r in result["data"] if r.get("propertyCurrency")), None)
-        out = {
+        return {
             "moneda": currency or client.settings.currency,  # sin reservas, la de hoteles.json
             **agg.revenue(result["data"], desde, hasta, unidades),
             "notas": [
@@ -758,7 +849,9 @@ async def ingresos_periodo(
             ],
             **_incomplete_note(result["truncado"]),
         }
-        return _out(client, out)
+
+    try:
+        return await _run(hotel, consulta, agg.merge_revenue)
     except _ERRORS as exc:
         return _error(exc)
 

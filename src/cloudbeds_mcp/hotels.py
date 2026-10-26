@@ -97,6 +97,7 @@ class HotelRegistry:
         self._factory = client_factory
         self._clients: dict[str, CloudbedsClient] = {}
         self._limiters: dict[str, RateLimiter] = {}
+        self.cache: dict[Any, Any] = {}  # datos que cambian poco (p. ej. inventario del día)
 
         self._marca = palabras_de_marca(h.nombre for h in config.hoteles if h.nombre)
         self._red = set().union(*(_formas(self._norm(p)) for p in (*NOMBRES_RED, *config.nombres_red)))

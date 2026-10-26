@@ -2,7 +2,17 @@
 
 > **Estado (26/10/2026):** fases 1 y 2 **completas**. Fase 3 **completa en código**, sin commit: 338 tests pasan, cobertura 98 %, 14 herramientas (incluida `hoteles`).
 > Fase 3 entregada: `scripts/agregar_hotel.py` (lógica en `admin.py`), `smoke_test.py` multi-hotel, `scripts/actualizar.py` + `actualizar.bat` (lógica en `updater.py`, probada con repositorios git reales) y `CHECKLIST_INSTALACION.md` con `git clone`, alta de hoteles y sección F de actualizaciones.
-> **Falta de la fase 3:** la prueba real, que necesita las 3 keys nuevas porque la actual devuelve 401, y hacer commit y push para que la PC del gerente pueda clonar. Las fases 4 y 5 están pendientes.
+> Fases 1 a 3 subidas a main en el commit 758e0a0. **Falta de la fase 3:** la prueba real, que necesita las 3 keys nuevas porque la actual devuelve 401.
+> Fase 4 **completa en código**, sin commit: 352 tests pasan, cobertura 98 %.
+> - `hotel="red"` funciona en `estado_hotel`, `resumen_dia`, `buscar_reservas`, `resumen_periodo` e `ingresos_periodo`.
+> - Si un hotel falla o no tiene key, el total de la red lo excluye y lo dice en `advertencia`.
+> - El inventario de cada hotel se guarda un día.
+>
+> Fase 5 **completa**:
+> - Actualizados `README.md`, `GUIA_GERENTE.md`, `.env.example`, `CHECKLIST_INSTALACION.md` y `PENDIENTES.md`.
+> - `REGISTRO_ACCESOS.md` pasa a ser una plantilla; el registro real va en `REGISTRO_ACCESOS.local.md`, que está en `.gitignore`.
+>
+> **Pendiente fuera del código:** las keys nuevas, la prueba real y la decisión de hacer privado el repositorio (ver `PENDIENTES.md`).
 > Nota sobre la fase 2: mientras no esté la fase 4, ninguna herramienta acepta "red". La descripción del parámetro le indica al modelo que consulte cada hotel por separado. La etiqueta `"hotel"` solo aparece con `hoteles.json`; en modo legacy las respuestas no cambian.
 > Para continuar, abre un chat en `D:\Juanjo\PROYECTOS\mcp-cloudbeds` y escribe:
 > *"Lee PLAN_MULTI_HOTEL.md y PENDIENTES.md. Sigue con la siguiente fase pendiente, con tests en verde."*
