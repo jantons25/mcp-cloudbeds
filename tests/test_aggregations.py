@@ -173,7 +173,7 @@ def test_day_summary_recorta_lista():
 # ---------- periodo y herramientas ----------
 
 def test_period_por_defecto_mes_en_curso(client, monkeypatch):
-    monkeypatch.setattr(server, "_today", lambda: date(2026, 2, 14))
+    monkeypatch.setattr(server, "_today", lambda tz=None: date(2026, 2, 14))  # _today recibe la tz del hotel
     assert server._period(None, None) == (date(2026, 2, 1), date(2026, 2, 28))
     assert server._period(None, "2026-03-10") == (date(2026, 3, 1), date(2026, 3, 10))
     assert server._period("2026-03-10", None) == (date(2026, 3, 10), date(2026, 3, 10))

@@ -6,13 +6,15 @@ IMPORTANTE: nada se escribe a stdout (lo usa JSON-RPC); los logs van a stderr.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -21,8 +23,9 @@ from pydantic import Field, TypeAdapter, ValidationError
 from . import aggregations as agg
 from . import formatters as fmt
 from .client import CloudbedsClient
-from .config import Settings, configure_logging, load_settings
-from .errors import CloudbedsError, ConfigError
+from .config import Catalog, configure_logging, load_catalog, load_hotels
+from .errors import CloudbedsError, ConfigError, HotelError
+from .hotels import HotelRegistry, descripcion_desde_catalogo
 
 logger = logging.getLogger("cloudbeds_mcp.server")
 
@@ -30,34 +33,75 @@ READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 )
 
-_client: CloudbedsClient | None = None
+# Errores que se devuelven como texto al modelo (no como excepción del protocolo).
+_ERRORS = (CloudbedsError, ConfigError, HotelError)
+
+_registry: HotelRegistry | None = None
 
 
 def set_client(client: CloudbedsClient | None) -> None:
-    """Inyecta un cliente (usado por los tests)."""
-    global _client
-    _client = client
+    """Inyecta un cliente de un solo hotel (usado por los tests)."""
+    set_registry(HotelRegistry.single(client) if client is not None else None)
 
 
-def _get_client() -> CloudbedsClient:
-    global _client
-    if _client is None:
-        _client = CloudbedsClient(load_settings())
-    return _client
+def set_registry(registry: HotelRegistry | None) -> None:
+    """Inyecta un registro de hoteles (usado por los tests)."""
+    global _registry
+    _registry = registry
 
 
-def _settings() -> Settings:
-    return _get_client().settings
+def _load_registry() -> HotelRegistry:
+    return HotelRegistry(load_hotels())
 
 
-def _today() -> date:
-    return datetime.now(_settings().tz).date()
+def _get_registry() -> HotelRegistry:
+    global _registry
+    if _registry is None:
+        _registry = _load_registry()
+    return _registry
+
+
+def _get_client(hotel: str | None = None) -> CloudbedsClient:
+    """Cliente del hotel pedido. Lanza HotelError si no se puede determinar cuál."""
+    return _get_registry().client(hotel)
+
+
+def _today(tz: ZoneInfo | None = None) -> date:
+    """Hoy en la zona horaria del hotel (por defecto, la del único hotel configurado)."""
+    return datetime.now(tz or _get_client().settings.tz).date()
 
 
 def _error(exc: Exception) -> str:
+    if isinstance(exc, HotelError):
+        return str(exc)  # ya explica qué hotel indicar; el modelo debe preguntarle al usuario
     if isinstance(exc, ConfigError):
         return f"No se pudo consultar Cloudbeds: falta configuración. {exc}"
     return f"No se pudo consultar Cloudbeds: {exc}"
+
+
+def _out(client: CloudbedsClient, data: dict[str, Any]) -> str:
+    """JSON de la respuesta. Con hoteles.json empieza por el hotel consultado, para no mezclar datos."""
+    s = client.settings
+    if s.hotel_name:
+        data = {"hotel": {"alias": s.hotel_alias, "nombre": s.hotel_name}, **data}
+    return fmt.to_json(data)
+
+
+def _catalog_at_import() -> Catalog | None:
+    """hoteles.json (sin secretos) para escribir las descripciones de las herramientas al arrancar."""
+    try:
+        return load_catalog()
+    except ConfigError as exc:
+        logger.warning("hoteles.json no es válido: %s", exc)  # el error se repetirá al consultar
+        return None
+
+
+_CATALOG = _catalog_at_import()
+
+# Parámetro `hotel` de las herramientas. Se pone al final para no alterar el orden de los demás.
+HotelUno = Annotated[
+    str | None, Field(description=descripcion_desde_catalogo(_CATALOG, admite_red=False), max_length=100)
+]
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -100,23 +144,33 @@ async def _lifespan(_: FastMCP) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        if _client is not None:
-            await _client.aclose()
+        if _registry is not None:
+            await _registry.aclose()
 
 
-mcp = FastMCP(
-    "cloudbeds",
-    instructions=(
-        "Consulta en modo SOLO LECTURA los datos de Cloudbeds del hotel (ocupación, llegadas, "
-        "salidas, reservas, disponibilidad, tarifas, habitaciones, housekeeping y canales). "
-        "Los montos están en la moneda del hotel. Las fechas son YYYY-MM-DD en hora de Lima (America/Lima). "
-        "Responde en español. Los datos personales de huéspedes pueden venir enmascarados."
-    ),
-    lifespan=_lifespan,
-)
+def _instructions(catalog: Catalog | None) -> str:
+    base = (
+        "Consulta en modo SOLO LECTURA los datos de Cloudbeds (ocupación, llegadas, salidas, "
+        "reservas, disponibilidad, tarifas, habitaciones, housekeeping y canales). "
+        "Los montos están en la moneda de cada hotel. Las fechas son YYYY-MM-DD en la zona horaria "
+        "de cada hotel (por defecto America/Lima). Responde en español. Los datos personales de "
+        "huéspedes pueden venir enmascarados."
+    )
+    if not catalog or len(catalog.hoteles) < 2:
+        return base
+    nombres = ", ".join(f"{h.nombre} ('{h.alias}')" for h in catalog.hoteles)
+    return (
+        f"{base} Hay {len(catalog.hoteles)} hoteles: {nombres}. El usuario los nombra sin la marca "
+        "y dice 'la red' para todos. Indica siempre el parámetro 'hotel'; si no sabes a qué hotel "
+        "se refiere, PREGÚNTALE. Cada respuesta dice qué hotel se consultó: nunca mezcles cifras "
+        "de hoteles distintos. La herramienta 'hoteles' lista los hoteles configurados."
+    )
+
+
+mcp = FastMCP("cloudbeds", instructions=_instructions(_CATALOG), lifespan=_lifespan)
 
 def _fecha_param(desc: str) -> object:
-    return Field(description=f"{desc} Formato YYYY-MM-DD (hora de Lima), ej. 2026-10-26.")
+    return Field(description=f"{desc} Formato YYYY-MM-DD (zona horaria del hotel), ej. 2026-10-26.")
 
 
 @mcp.tool(
@@ -133,19 +187,20 @@ def _fecha_param(desc: str) -> object:
 )
 async def estado_hotel(
     fecha: Annotated[str | None, _fecha_param("Fecha a consultar; si se omite, hoy.")] = None,
+    hotel: HotelUno = None,
 ) -> str:
     try:
         dia_param = _parse_fecha(fecha, "consulta")
     except ValueError as exc:
         return str(exc)
     try:
-        client = _get_client()
-        dia = dia_param or _today()
+        client = _get_client(hotel)
+        dia = dia_param or _today(client.settings.tz)
         body = await client.get(
             "getDashboard", {"propertyID": client.settings.property_id, "date": dia.isoformat()}
         )
-        return fmt.to_json(fmt.dashboard(body.get("data") or {}, dia.isoformat()))
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, fmt.dashboard(body.get("data") or {}, dia.isoformat()))
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -177,6 +232,7 @@ async def buscar_reservas(
     max_resultados: Annotated[
         int, Field(description="Máximo de reservas a devolver (1-500). Por defecto 50.", ge=1, le=500)
     ] = 50,
+    hotel: HotelUno = None,
 ) -> str:
     try:
         ci_desde = _parse_fecha(checkin_desde, "check-in desde")
@@ -188,7 +244,7 @@ async def buscar_reservas(
     except ValueError as exc:
         return str(exc)
     try:
-        client = _get_client()
+        client = _get_client(hotel)
         params = {
             "propertyID": client.settings.property_id,
             "status": estado,
@@ -205,8 +261,8 @@ async def buscar_reservas(
         out = {"cantidad": len(reservas), "total_en_cloudbeds": result["total"], "truncado": result["truncado"], "reservas": reservas}
         if result["truncado"]:
             out["nota"] = "Hay más reservas que las mostradas; aumenta max_resultados o acota los filtros."
-        return fmt.to_json(out)
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, out)
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -224,21 +280,22 @@ async def detalle_reserva(
     reservation_id: Annotated[
         str, Field(description="ID de la reserva en Cloudbeds.", min_length=1, max_length=64)
     ],
+    hotel: HotelUno = None,
 ) -> str:
     try:
-        client = _get_client()
+        client = _get_client(hotel)
         body = await client.get(
             "getReservation",
             {"propertyID": client.settings.property_id, "reservationID": reservation_id.strip()},
         )
-        return fmt.to_json(fmt.reservation_detail(body.get("data") or {}, client.settings.show_pii))
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, fmt.reservation_detail(body.get("data") or {}, client.settings.show_pii))
+    except _ERRORS as exc:
         return _error(exc)
 
 
-def _stay(entrada: str | None, salida: str | None) -> tuple[date, date, int]:
+def _stay(entrada: str | None, salida: str | None, tz: ZoneInfo | None = None) -> tuple[date, date, int]:
     """Fechas de estadía: entrada por defecto hoy; salida por defecto entrada + 1 noche."""
-    d_in = _parse_fecha(entrada, "entrada") or _today()
+    d_in = _parse_fecha(entrada, "entrada") or _today(tz)
     d_out = _parse_fecha(salida, "salida") or d_in + timedelta(days=1)
     if d_out <= d_in:
         raise ValueError("La fecha de salida debe ser posterior a la de entrada.")
@@ -263,13 +320,16 @@ async def disponibilidad(
     habitaciones: Annotated[int, Field(description="Número de habitaciones (1-20).", ge=1, le=20)] = 1,
     adultos: Annotated[int, Field(description="Adultos por habitación (1-20).", ge=1, le=20)] = 1,
     ninos: Annotated[int, Field(description="Niños por habitación (0-20).", ge=0, le=20)] = 0,
+    hotel: HotelUno = None,
 ) -> str:
     try:
-        d_in, d_out, noches = _stay(fecha_entrada, fecha_salida)
+        client = _get_client(hotel)
+        d_in, d_out, noches = _stay(fecha_entrada, fecha_salida, client.settings.tz)
     except ValueError as exc:
         return str(exc)
+    except _ERRORS as exc:
+        return _error(exc)
     try:
-        client = _get_client()
         body = await client.get(
             "getAvailableRoomTypes",
             {
@@ -292,8 +352,8 @@ async def disponibilidad(
         }
         if not out["tipos"]:
             out["nota"] = "No hay tipos de habitación disponibles para esos parámetros."
-        return fmt.to_json(out)
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, out)
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -306,15 +366,16 @@ async def disponibilidad(
     annotations=READ_ONLY,
     structured_output=False,
 )
-async def tipos_habitacion() -> str:
+async def tipos_habitacion(hotel: HotelUno = None) -> str:
     try:
-        client = _get_client()
+        client = _get_client(hotel)
         result = await client.get_all("getRoomTypes", {"propertyIDs": client.settings.property_id})
         tipos = [fmt.room_type(r) for r in result["data"]]
-        return fmt.to_json(
-            {"cantidad_tipos": len(tipos), "total_unidades": sum(t.get("unidades", 0) for t in tipos), "tipos": tipos}
+        return _out(
+            client,
+            {"cantidad_tipos": len(tipos), "total_unidades": sum(t.get("unidades", 0) for t in tipos), "tipos": tipos},
         )
-    except (CloudbedsError, ConfigError) as exc:
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -351,6 +412,7 @@ async def habitaciones(
     ] = None,
     fecha_desde: Annotated[str | None, _fecha_param("Inicio del periodo (requiere fecha_hasta).")] = None,
     fecha_hasta: Annotated[str | None, _fecha_param("Fin del periodo (requiere fecha_desde).")] = None,
+    hotel: HotelUno = None,
 ) -> str:
     try:
         desde = _parse_fecha(fecha_desde, "desde")
@@ -364,7 +426,7 @@ async def habitaciones(
     except ValueError as exc:
         return str(exc)
     try:
-        client = _get_client()
+        client = _get_client(hotel)
         rooms = await _all_rooms(
             client,
             {
@@ -381,8 +443,8 @@ async def habitaciones(
                 "no equivale a disponibles para vender"
             )
             out["bloqueadas_incluidas"] = sum(1 for r in rooms if r.get("roomBlocked"))
-        return fmt.to_json(out)
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, out)
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -398,19 +460,21 @@ async def habitaciones(
 )
 async def asignaciones_del_dia(
     fecha: Annotated[str | None, _fecha_param("Fecha a consultar; si se omite, hoy.")] = None,
+    hotel: HotelUno = None,
 ) -> str:
     try:
         dia_param = _parse_fecha(fecha, "consulta")
     except ValueError as exc:
         return str(exc)
     try:
-        client = _get_client()
-        dia = dia_param or _today()
+        client = _get_client(hotel)
+        dia = dia_param or _today(client.settings.tz)
         body = await client.get(
             "getReservationAssignments", {"propertyID": client.settings.property_id, "date": dia.isoformat()}
         )
         items = [fmt.assignment(a) for a in (body.get("data") or [])]
-        return fmt.to_json(
+        return _out(
+            client,
             {
                 "fecha": dia.isoformat(),
                 "reservas": len(items),
@@ -419,7 +483,7 @@ async def asignaciones_del_dia(
                 "asignaciones": items,
             }
         )
-    except (CloudbedsError, ConfigError) as exc:
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -439,9 +503,10 @@ async def estado_housekeeping(
         Literal["clean", "dirty"] | None, Field(description="clean=limpia, dirty=sucia.")
     ] = None,
     ocupada: Annotated[bool | None, Field(description="true=solo ocupadas, false=solo libres.")] = None,
+    hotel: HotelUno = None,
 ) -> str:
     try:
-        client = _get_client()
+        client = _get_client(hotel)
         # Se piden todas las habitaciones y se filtra aquí: Cloudbeds ignoraba roomOccupied=false
         # (devolvía las ocupadas). Además el campo 'total' no es fiable; se cuentan los elementos.
         result = await client.get_all("getHousekeepingStatus", {"propertyID": client.settings.property_id})
@@ -460,8 +525,8 @@ async def estado_housekeeping(
             "bloqueadas": sum(1 for r in rooms if r.get("bloqueada")),
             "por_estado_recepcion": dict(Counter(r.get("estado_recepcion") for r in rooms if r.get("estado_recepcion"))),
         }
-        return fmt.to_json({"resumen": resumen, "truncado": result["truncado"], "habitaciones": rooms})
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, {"resumen": resumen, "truncado": result["truncado"], "habitaciones": rooms})
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -477,15 +542,16 @@ async def estado_housekeeping(
 )
 async def fuentes_reserva(
     solo_activas: Annotated[bool, Field(description="true=solo fuentes activas (por defecto).")] = True,
+    hotel: HotelUno = None,
 ) -> str:
     try:
-        client = _get_client()
+        client = _get_client(hotel)
         body = await client.get("getSources", {"propertyIDs": client.settings.property_id})
         fuentes = [fmt.source(s) for s in fmt.flatten(body.get("data"))]
         if solo_activas:
             fuentes = [f for f in fuentes if f.get("activa")]
-        return fmt.to_json({"cantidad": len(fuentes), "fuentes": fuentes})
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, {"cantidad": len(fuentes), "fuentes": fuentes})
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -504,13 +570,16 @@ async def planes_tarifa(
     fecha_salida: Annotated[str | None, _fecha_param("Check-out; si se omite, el día siguiente a la entrada.")] = None,
     adultos: Annotated[int | None, Field(description="Adultos (opcional, 1-20).", ge=1, le=20)] = None,
     ninos: Annotated[int | None, Field(description="Niños (opcional, 0-20).", ge=0, le=20)] = None,
+    hotel: HotelUno = None,
 ) -> str:
     try:
-        d_in, d_out, noches = _stay(fecha_entrada, fecha_salida)
+        client = _get_client(hotel)
+        d_in, d_out, noches = _stay(fecha_entrada, fecha_salida, client.settings.tz)
     except ValueError as exc:
         return str(exc)
+    except _ERRORS as exc:
+        return _error(exc)
     try:
-        client = _get_client()
         body = await client.get(
             "getRatePlans",
             {
@@ -522,10 +591,11 @@ async def planes_tarifa(
             },
         )
         planes = [fmt.rate_plan(r, noches) for r in (body.get("data") or [])]
-        return fmt.to_json(
-            {"entrada": d_in.isoformat(), "salida": d_out.isoformat(), "noches": noches, "cantidad": len(planes), "planes": planes}
+        return _out(
+            client,
+            {"entrada": d_in.isoformat(), "salida": d_out.isoformat(), "noches": noches, "cantidad": len(planes), "planes": planes},
         )
-    except (CloudbedsError, ConfigError) as exc:
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -536,12 +606,12 @@ AGG_MAX_RESULTS = 5000  # las agregaciones necesitan todas las reservas del peri
 AGG_CONCURRENCY = 4  # páginas en paralelo (el rate limiter mantiene 4 req/s)
 
 
-def _period(desde: str | None, hasta: str | None) -> tuple[date, date]:
-    """Periodo inclusivo. Por defecto, el mes en curso (hora de Lima)."""
+def _period(desde: str | None, hasta: str | None, tz: ZoneInfo | None = None) -> tuple[date, date]:
+    """Periodo inclusivo. Por defecto, el mes en curso (zona horaria del hotel)."""
     d1 = _parse_fecha(desde, "desde")
     d2 = _parse_fecha(hasta, "hasta")
     if d1 is None and d2 is None:
-        hoy = _today()
+        hoy = _today(tz)
         d1 = hoy.replace(day=1)
         d2 = (d1 + timedelta(days=32)).replace(day=1) - timedelta(days=1)
     elif d1 is None:
@@ -574,14 +644,15 @@ def _incomplete_note(truncado: bool) -> dict[str, str]:
 )
 async def resumen_dia(
     fecha: Annotated[str | None, _fecha_param("Día a resumir; si se omite, hoy.")] = None,
+    hotel: HotelUno = None,
 ) -> str:
     try:
         dia_param = _parse_fecha(fecha, "consulta")
     except ValueError as exc:
         return str(exc)
     try:
-        client = _get_client()
-        dia = (dia_param or _today()).isoformat()
+        client = _get_client(hotel)
+        dia = (dia_param or _today(client.settings.tz)).isoformat()
         pid = client.settings.property_id
         dash = await client.get("getDashboard", {"propertyID": pid, "date": dia})
         base = {"propertyID": pid, "includeAllRooms": True}
@@ -589,8 +660,8 @@ async def resumen_dia(
         dep = await client.get_all("getReservations", {**base, "checkOutFrom": dia, "checkOutTo": dia}, max_results=AGG_MAX_RESULTS)
         out = agg.day_summary(dash.get("data") or {}, arr["data"], dep["data"], dia)
         out.update(_incomplete_note(arr["truncado"] or dep["truncado"]))
-        return fmt.to_json(out)
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, out)
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -612,13 +683,16 @@ async def resumen_periodo(
     criterio: Annotated[
         Literal["checkin", "creacion"], Field(description="checkin=llegadas del periodo; creacion=reservas hechas en el periodo.")
     ] = "checkin",
+    hotel: HotelUno = None,
 ) -> str:
     try:
-        desde, hasta = _period(fecha_desde, fecha_hasta)
+        client = _get_client(hotel)
+        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
     except ValueError as exc:
         return str(exc)
+    except _ERRORS as exc:
+        return _error(exc)
     try:
-        client = _get_client()
         params: dict[str, object] = {"propertyID": client.settings.property_id, "includeAllRooms": True}
         if criterio == "checkin":
             params.update(checkInFrom=desde.isoformat(), checkInTo=hasta.isoformat())
@@ -632,8 +706,8 @@ async def resumen_periodo(
         }
         if criterio == "checkin":
             out["nota"] = "Las noches cuentan la estadía completa de las reservas que llegan en el periodo, aunque salgan después."
-        return fmt.to_json(out)
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, out)
+    except _ERRORS as exc:
         return _error(exc)
 
 
@@ -653,13 +727,16 @@ async def resumen_periodo(
 async def ingresos_periodo(
     fecha_desde: Annotated[str | None, _fecha_param("Primera noche del periodo (incluida).")] = None,
     fecha_hasta: Annotated[str | None, _fecha_param("Última noche del periodo (incluida).")] = None,
+    hotel: HotelUno = None,
 ) -> str:
     try:
-        desde, hasta = _period(fecha_desde, fecha_hasta)
+        client = _get_client(hotel)
+        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
     except ValueError as exc:
         return str(exc)
+    except _ERRORS as exc:
+        return _error(exc)
     try:
-        client = _get_client()
         pid = client.settings.property_id
         co_from, co_to = agg.stay_query_window(desde, hasta)
         result = await client.get_all(
@@ -672,7 +749,7 @@ async def ingresos_periodo(
         unidades = sum(int(t.get("roomTypeUnits") or 0) for t in tipos["data"]) or None
         currency = next((r.get("propertyCurrency") for r in result["data"] if r.get("propertyCurrency")), None)
         out = {
-            "moneda": currency,
+            "moneda": currency or client.settings.currency,  # sin reservas, la de hoteles.json
             **agg.revenue(result["data"], desde, hasta, unidades),
             "notas": [
                 "Bruto = suma de tarifas por noche (impuestos incluidos). Neto = importe de habitación sin impuestos (subTotal) prorrateado por noche; refleja ajustes manuales de precio.",
@@ -681,9 +758,66 @@ async def ingresos_periodo(
             ],
             **_incomplete_note(result["truncado"]),
         }
-        return fmt.to_json(out)
-    except (CloudbedsError, ConfigError) as exc:
+        return _out(client, out)
+    except _ERRORS as exc:
         return _error(exc)
+
+
+# ---------- hoteles ----------
+
+def _currency_code(value: Any) -> str | None:
+    # getHotelDetails devuelve la moneda como objeto {currencyCode, currencySymbol, ...}
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        return value.get("currencyCode")
+    return value if isinstance(value, str) else None
+
+
+async def _verify_hotel(registry: HotelRegistry, item: dict[str, Any]) -> None:
+    """Comprueba con getHotelDetails que la key del hotel funciona y ve su propiedad."""
+    try:
+        client = registry.client(item["alias"])
+        body = await client.get("getHotelDetails", {"propertyID": client.settings.property_id})
+    except _ERRORS as exc:
+        item.update(verificado=False, error=str(exc))
+        return
+    data = body.get("data") or {}
+    item.update(verificado=True, nombre_en_cloudbeds=data.get("propertyName"))
+    moneda = _currency_code(data.get("propertyCurrency"))
+    if moneda and item.get("moneda") and moneda != item["moneda"]:
+        item["advertencia"] = f"hoteles.json dice moneda {item['moneda']} y Cloudbeds dice {moneda}."
+    item["moneda"] = moneda or item.get("moneda")
+
+
+@mcp.tool(
+    title="Hoteles",
+    description=(
+        "Lista los hoteles configurados: alias, nombre, propertyID, zona horaria, moneda y si están "
+        "disponibles (si hay API key en esta PC). Úsala si el usuario pregunta qué hoteles hay o si "
+        "no reconoces el nombre del hotel que menciona. Con verificar=true consulta Cloudbeds para "
+        "confirmar que cada key funciona (más lento)."
+    ),
+    annotations=READ_ONLY,
+    structured_output=False,
+)
+async def hoteles(
+    verificar: Annotated[bool, Field(description="true=comprueba cada hotel en Cloudbeds.")] = False,
+) -> str:
+    try:
+        registry = _get_registry()
+    except _ERRORS as exc:
+        return _error(exc)
+    items = registry.describe()
+    if verificar:
+        await asyncio.gather(*(_verify_hotel(registry, i) for i in items if i["disponible"]))
+    out: dict[str, Any] = {"cantidad": len(items), "hoteles": items}
+    if registry.multi:
+        out["nota"] = (
+            "Indica el hotel por su alias o nombre en el parámetro 'hotel' de cada herramienta. "
+            "Si el usuario no dice de qué hotel habla, pregúntale."
+        )
+    return fmt.to_json(out)
 
 
 def main() -> None:

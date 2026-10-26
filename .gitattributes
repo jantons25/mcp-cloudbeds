@@ -1,0 +1,2 @@
+# Los .bat de Windows necesitan CRLF aunque se clonen desde otro sistema.
+*.bat text eol=crlf

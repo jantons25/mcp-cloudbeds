@@ -1,5 +1,6 @@
-# Secretos
+# Secretos y configuración propia de cada PC
 .env
+hoteles.json
 
 # Entorno virtual
 .venv/

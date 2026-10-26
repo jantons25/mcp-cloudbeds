@@ -206,6 +206,6 @@ async def test_sin_api_key_mensaje_claro(monkeypatch):
         from cloudbeds_mcp.errors import ConfigError
         raise ConfigError("Falta CLOUDBEDS_API_KEY.")
 
-    monkeypatch.setattr(server, "load_settings", boom)
+    monkeypatch.setattr(server, "_load_registry", boom)  # el servidor carga los hoteles por aquí
     out = await server.estado_hotel()
     assert "falta configuración" in out and "CLOUDBEDS_API_KEY" in out

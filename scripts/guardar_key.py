@@ -8,6 +8,9 @@ Uso (desde la raíz del proyecto):
 
 La key se escribe sin eco (no se ve en pantalla), se verifica contra Cloudbeds antes de
 guardarla y nunca se imprime.
+
+Este script maneja la key de la instalación de UN solo hotel. Con varios hoteles
+(hoteles.json) usa scripts/agregar_hotel.py, que guarda una key por hotel.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import keyring  # noqa: E402
 from cloudbeds_mcp.client import CloudbedsClient  # noqa: E402
 from cloudbeds_mcp.config import (  # noqa: E402
     ENV_PATH,
+    HOTELES_PATH,
     KEYRING_SERVICE,
     KEYRING_USER,
     key_from_keyring,
@@ -72,6 +76,9 @@ def estado() -> int:
         print(f"El servidor usará la key de: {load_settings().key_source}")
     except ConfigError as exc:
         print(f"[CONFIG] {exc}")
+    if HOTELES_PATH.exists():
+        print(f"\nHay {HOTELES_PATH.name}: el servidor trabaja con varios hoteles. "
+              "Revisa las keys de cada uno con 'scripts/agregar_hotel.py --estado'.")
     return 0
 
 

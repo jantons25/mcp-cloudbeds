@@ -30,7 +30,14 @@ class NotAllowedError(CloudbedsError):
 
 
 class ConfigError(Exception):
-    """Configuración incompleta o inválida en .env."""
+    """Configuración incompleta o inválida en .env o hoteles.json."""
+
+
+class HotelError(Exception):
+    """No se pudo determinar el hotel: no indicado, no encontrado, ambiguo o sin API key.
+
+    El mensaje está pensado para que el modelo le pregunte al usuario (lista los hoteles).
+    """
 
 
 # Mensajes success:false documentados por Cloudbeds -> explicación en español.

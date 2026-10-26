@@ -120,7 +120,9 @@ class CloudbedsClient:
         rate: float = REQUESTS_PER_SECOND,
         sleep: Sleep = asyncio.sleep,
         timeout: float = TIMEOUT_SECONDS,
+        limiter: RateLimiter | None = None,
     ) -> None:
+        """`limiter` permite compartir el límite de 4 req/s entre clientes que usan la misma key."""
         if not base_url.startswith("https://"):
             raise ValueError("La API de Cloudbeds solo se consume por HTTPS.")
         headers = {
@@ -132,7 +134,7 @@ class CloudbedsClient:
             headers["X-PROPERTY-ID"] = settings.property_id
         self.settings = settings
         self._sleep = sleep
-        self._limiter = RateLimiter(rate, sleep=sleep)
+        self._limiter = limiter or RateLimiter(rate, sleep=sleep)
         self._http = httpx.AsyncClient(
             base_url=base_url, headers=headers, timeout=timeout, transport=transport
         )

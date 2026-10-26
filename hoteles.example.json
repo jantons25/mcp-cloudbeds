@@ -1,0 +1,27 @@
+{
+  "_comentario": "Copia como hoteles.json (o usa scripts/agregar_hotel.py). Sin secretos: las API keys van en el keyring. Las claves que empiezan por '_' se ignoran.",
+  "hoteles": [
+    {
+      "alias": "balta",
+      "nombre": "Zentra Balta",
+      "property_id": "000001",
+      "tz": "America/Lima",
+      "moneda": "PEN",
+      "otros_nombres": []
+    },
+    {
+      "alias": "plaza",
+      "nombre": "Zentra Plaza",
+      "property_id": "000002",
+      "tz": "America/Lima",
+      "moneda": "PEN"
+    },
+    {
+      "alias": "san_jose",
+      "nombre": "Zentra San José",
+      "property_id": "000003",
+      "tz": "America/Lima",
+      "moneda": "PEN"
+    }
+  ]
+}
