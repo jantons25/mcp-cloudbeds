@@ -1,0 +1,15 @@
+# --- Ejecución ---
+# mcp se fija en 1.x: en 2.x FastMCP pasó a llamarse MCPServer y cambió la API.
+mcp[cli]==1.30.0
+httpx==0.28.1
+python-dotenv==1.2.4
+pydantic==2.14.1
+tzdata==2026.5
+# Guardar la API key en el Administrador de credenciales (Windows) o Llavero (macOS)
+keyring==25.7.0
+
+# --- Desarrollo / tests ---
+pytest==9.1.1
+pytest-asyncio==1.4.1
+respx==0.23.1
+pytest-cov==7.1.0
