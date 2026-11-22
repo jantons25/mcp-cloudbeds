@@ -100,6 +100,21 @@ async def test_extras_un_hotel(registry, cloudbeds):
     ]}
 
 
+
+async def test_extras_por_producto_de_un_rubro(registry, cloudbeds):
+    out = json.loads(await server.extras_periodo("2026-11-15", "2026-11-15", agrupar="producto",
+                                                 rubro="minibar", hotel="balta"))
+    assert out["por_rubro"] == {"Minibar": {"importe": 6.0, "movimientos": 1, "unidades": 1.0, "productos": {
+        "Agua San Luis": {"importe": 6.0, "movimientos": 1, "unidades": 1.0}}}}
+    assert out["filtro_rubro"] == "minibar"
+    assert any(n.startswith("Producto =") for n in out["notas"])
+
+
+async def test_red_por_producto(registry, cloudbeds):
+    out = json.loads(await server.extras_periodo("2026-11-15", "2026-11-15", agrupar="producto", hotel="red"))
+    assert out["total_red"]["por_rubro"]["Otros"]["productos"] == {
+        "Lavandería": {"importe": 75.0, "movimientos": 2, "unidades": 2.0}}
+
 async def test_catalogos_se_guardan_un_dia(registry, cloudbeds):
     await server.extras_periodo("2026-11-15", "2026-11-15", hotel="balta")
     await server.extras_periodo("2026-11-15", "2026-11-15", agrupar="dia", hotel="balta")

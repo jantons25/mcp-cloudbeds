@@ -124,7 +124,7 @@ La columna **Red** indica si la herramienta acepta `hotel="red"` y devuelve el t
 | `resumen_dia` | ✅ | Ocupación del día, llegadas y salidas (total, ya realizadas, pendientes), no-show, cancelaciones y lista corta |
 | `resumen_periodo` | ✅ | Reservas del periodo por estado, fuente y tipo de habitación, noches, estancia media y cancelaciones. `criterio`: `checkin` (llegadas del periodo) o `creacion` (reservas hechas en el periodo) |
 | `ingresos_periodo` | ✅ | Ingresos de habitación por fecha de estadía: bruto y neto, ADR, ocupación, RevPAR y desglose por fuente y por tipo |
-| `extras_periodo` | ✅ | Extras cargados a las cuentas (minibar, cafetería, lavandería, productos…) por **rubro** (categoría de ítems de Cloudbeds) y, con `agrupar`, por día. Fecha de servicio |
+| `extras_periodo` | ✅ | Extras cargados a las cuentas (minibar, cafetería, lavandería, productos…) por **rubro** (categoría de ítems de Cloudbeds) y, con `agrupar`, por día o por **producto** (`agrupar="producto"`); `rubro` limita la respuesta a un rubro. Fecha de servicio |
 | `pagos_periodo` | ✅ | Pagos recibidos por **medio de pago** (efectivo, tarjetas, transferencia, Yape, Plin…) y, con `agrupar`, por día; anulaciones y devoluciones aparte. `fecha`: `pago` (día en que se registró) o `contable` (día del cierre de caja) |
 | `resumen_financiero` | ✅ | Cargos por tipo (habitación, productos y servicios, complementos, impuestos…) con desglose por código contable, pagos aplicados y diferencia cargos - pagos. Fecha de servicio |
 

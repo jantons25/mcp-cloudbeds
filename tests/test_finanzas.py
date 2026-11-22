@@ -199,6 +199,88 @@ def test_resumen_financiero():
     assert out["cargos_menos_pagos"] == 579.0
 
 
+
+# ---------- extras por producto ----------
+
+PRODUCTOS_ITEMS = ITEMS + [
+    {"itemID": "2001", "name": "Agua San Luis con Gas 625 ml - EX", "categoryName": "A&B Exhibidoras"},
+    {"itemID": "2002", "name": "Agua San Luis sin Gas 625 ml - EX", "categoryName": "A&B Exhibidoras"},
+]
+PRODUCTOS_TX = [
+    tx("ITEM", 6.0, "Agua San Luis 625ml", serviceDate="2026-11-15", quantity=1),
+    tx("ITEM", 12.0, "Agua San Luis 625ml", serviceDate="2026-11-16", quantity=2),
+    tx("ITEM", 5.0, "Agua San Luis con Gas 625 ml - EX", serviceDate="2026-11-16", quantity=1),
+    tx("ITEM", 4.5, "Agua San Luis - EX", serviceDate="2026-11-16", quantity=1),  # renombrado: ¿con o sin gas?
+    tx("ITEM", -4.5, "Agua San Luis - EX", serviceDate="2026-11-16", quantity=1),  # su anulación
+    tx("ITEM", 8.0, "Shampoo", serviceDate="2026-11-16", quantity=2),
+    tx("ITEM", 9.0, "Agua Rosa Quispe", serviceDate="2026-11-16"),  # trae un nombre ajeno al catálogo
+    tx("ADDON", 30.0, "Desayuno incluido", serviceDate="2026-11-16", quantity=2),
+]
+
+
+def _extras_producto(**kw):
+    return fin.extras(PRODUCTOS_TX, fin.catalogo_rubros(PRODUCTOS_ITEMS), "producto",
+                      fin.catalogo_productos(PRODUCTOS_ITEMS), **kw)
+
+
+def test_extras_por_producto_dentro_de_cada_rubro():
+    out = _extras_producto()
+    exhib = out["por_rubro"]["A&B Exhibidoras"]
+    assert exhib["importe"] == 23.0
+    assert exhib["productos"] == {
+        "Agua San Luis 625ml": {"importe": 18.0, "movimientos": 2, "unidades": 3.0},
+        "Agua San Luis con Gas 625 ml - EX": {"importe": 5.0, "movimientos": 1, "unidades": 1.0},
+        "Agua San Luis - EX": {"importe": 0.0, "movimientos": 2, "unidades": 0.0},  # cargo y anulación
+    }
+    assert out["por_rubro"]["Productos de Aseo"]["productos"] == {"Shampoo": {"importe": 8.0, "movimientos": 1, "unidades": 2.0}}
+    assert out["por_rubro"]["Complementos (add-ons)"]["productos"] == {
+        fin.SIN_PRODUCTO: {"importe": 30.0, "movimientos": 1, "unidades": 2.0}}
+
+
+def test_extras_por_producto_nunca_muestra_texto_ajeno_al_catalogo():
+    out = _extras_producto()
+    assert "Rosa" not in str(out) and "Quispe" not in str(out)
+    assert out["por_rubro"]["Sin clasificar"]["productos"] == {fin.SIN_PRODUCTO: {"importe": 9.0, "movimientos": 1, "unidades": 1.0}}
+
+
+def test_extras_filtrados_por_rubro_sin_tildes_ni_mayusculas():
+    out = _extras_producto(rubro="EXHIBIDORAS")
+    assert list(out["por_rubro"]) == ["A&B Exhibidoras"]
+    assert out["total"] == {"importe": 23.0, "movimientos": 5, "unidades": 4.0}
+    assert out["filtro_rubro"] == "EXHIBIDORAS" and "aviso" not in out
+    assert "sin_clasificar" not in out
+
+
+def test_extras_filtro_sin_coincidencias_lista_los_rubros():
+    out = _extras_producto(rubro="minibar")
+    assert out["por_rubro"] == {} and out["total"]["importe"] == 0.0
+    assert "Ningún rubro contiene 'minibar'" in out["aviso"]
+    assert "A&B Exhibidoras, Complementos (add-ons), Productos de Aseo, Sin clasificar" in out["aviso"]
+
+
+def test_extras_sin_agrupar_por_producto_no_trae_productos():
+    out = fin.extras(PRODUCTOS_TX, fin.catalogo_rubros(PRODUCTOS_ITEMS), "rubro", fin.catalogo_productos(PRODUCTOS_ITEMS))
+    assert all("productos" not in v for v in out["por_rubro"].values())
+
+
+def test_catalogo_solo_palabras_del_catalogo():
+    productos = fin.catalogo_productos(PRODUCTOS_ITEMS)
+    assert productos.solo_palabras_del_catalogo("agua san luis - ex")
+    assert not productos.solo_palabras_del_catalogo("Agua San Luis - Rosa")
+    assert not productos.solo_palabras_del_catalogo("625")
+    assert not productos.solo_palabras_del_catalogo(None)
+
+
+def test_merge_extras_suma_y_ordena_productos():
+    def h(agua, vino):
+        return {"periodo": {"dias": 1}, "moneda": "PEN", "total": {"importe": agua + vino},
+                "por_rubro": {"A&B": {"importe": agua + vino, "productos": {
+                    "Agua": {"importe": agua, "movimientos": 1, "unidades": 1.0},
+                    "Vino": {"importe": vino, "movimientos": 1, "unidades": 1.0}}}}}
+    out = fin.merge_extras({"balta": h(10.0, 5.0), "plaza": h(1.0, 45.0)})
+    assert list(out["por_rubro"]["A&B"]["productos"]) == ["Vino", "Agua"]
+    assert out["por_rubro"]["A&B"]["productos"]["Vino"] == {"importe": 50.0, "movimientos": 2, "unidades": 2.0}
+
 # ---------- total de la red ----------
 
 def _hotel(moneda, importe, dia_importe):

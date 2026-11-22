@@ -13,7 +13,10 @@ Reglas verificadas contra la API real (Zentra Balta, 15/11/2026, ver PLAN_MULTI_
   con los medios configurados en getPaymentMethods (23 de 23 en la prueba). El código
   interno no alcanza (9000 mezcla débito y Yape).
 
-Nunca se devuelven las descripciones: pueden traer nombres de huéspedes.
+Nunca se devuelven las descripciones: pueden traer nombres de huéspedes. El detalle por
+producto usa el nombre del catálogo (getItems); solo cuando un cargo es de un ítem renombrado
+y no se sabe cuál de varios es, se muestra su texto, y únicamente si todas sus palabras están
+en el nombre de un mismo ítem del catálogo (así nunca aparece un nombre de huésped).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ PAGO = "PAYMENT"
 SIN_RUBRO = "Sin clasificar"
 SIN_MEDIO = "No identificado"
 SIN_CATEGORIA = "Sin categoría en Cloudbeds"
+SIN_PRODUCTO = "Sin identificar (nombre distinto al catálogo)"
 RUBRO_POR_TIPO = {"ADDON": "Complementos (add-ons)", "ITEM_POS": "Punto de venta (POS)"}
 TIPOS = {
     "ROOM": "Habitación",
@@ -107,6 +111,13 @@ class Catalogo:
             candidatas.discard(self._ignorar)
         return candidatas.pop() if len(candidatas) == 1 else None
 
+    def solo_palabras_del_catalogo(self, texto: Any) -> bool:
+        """Todas las palabras del texto están en el nombre de un mismo ítem (no hay nada ajeno al catálogo)."""
+        palabras = set(norm(texto).split())
+        if not any(len(p) >= 3 and not p.isdigit() for p in palabras):
+            return False
+        return any(palabras <= nombre for nombre, _ in self._palabras)
+
 
 def catalogo_rubros(items: list[dict[str, Any]]) -> Catalogo:
     """Nombre del ítem (getItems) -> su categoría."""
@@ -114,6 +125,22 @@ def catalogo_rubros(items: list[dict[str, Any]]) -> Catalogo:
         c = str(i.get("categoryName") or "").strip()
         return c if c and c.lower() != "uncategorized" else SIN_CATEGORIA
     return Catalogo(((i.get("name"), categoria(i)) for i in items if i.get("name")), parcial=True, ignorar=SIN_CATEGORIA)
+
+
+def catalogo_productos(items: list[dict[str, Any]]) -> Catalogo:
+    """Nombre del ítem (getItems) -> el mismo nombre, tal como está en el catálogo."""
+    return Catalogo(((i.get("name"), " ".join(str(i.get("name")).split())) for i in items if i.get("name")), parcial=True)
+
+
+def producto(t: dict[str, Any], productos: Catalogo) -> str:
+    """Nombre del producto de un extra, sin exponer texto libre de la descripción."""
+    desc = t.get("description")
+    nombre = productos.buscar(desc)
+    if nombre:
+        return nombre
+    if productos.solo_palabras_del_catalogo(desc):  # ítem renombrado: se sabe el rubro pero no cuál ítem
+        return " ".join(str(desc).split())[:80]
+    return SIN_PRODUCTO
 
 
 # Medios equivalentes con nombres distintos según el hotel (verificado en los 3 hoteles, nov-2026):
@@ -172,10 +199,23 @@ def _unidades(t: dict[str, Any], importe: float) -> float:
 
 # ---------- extras ----------
 
-def extras(transacciones: list[dict[str, Any]], rubros: Catalogo, agrupar: str = "rubro") -> dict[str, Any]:
-    """Extras (ITEM, ITEM_POS, ADDON) por rubro y, si se pide, por día de servicio."""
+def extras(
+    transacciones: list[dict[str, Any]],
+    rubros: Catalogo,
+    agrupar: str = "rubro",
+    productos: Catalogo | None = None,
+    rubro: str | None = None,
+) -> dict[str, Any]:
+    """Extras (ITEM, ITEM_POS, ADDON) por rubro y, si se pide, por día de servicio o por producto.
+
+    `rubro` limita el resultado a los rubros cuyo nombre contiene ese texto (sin tildes ni mayúsculas).
+    """
+    filtro = norm(rubro) if rubro else ""
+    productos = productos or Catalogo([])
     total, sin = _acum(), _acum()
     por_rubro: dict[str, dict[str, float]] = defaultdict(_acum)
+    por_producto: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(_acum))
+    vistos: set[str] = set()
     por_dia: dict[str, dict[str, float]] = defaultdict(_acum)
     por_dia_rubro: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     anulaciones = 0
@@ -185,18 +225,31 @@ def extras(transacciones: list[dict[str, Any]], rubros: Catalogo, agrupar: str =
             continue
         importe = monto(t)
         unidades = _unidades(t, importe)
-        rubro = rubros.buscar(t.get("description")) or RUBRO_POR_TIPO.get(str(tipo)) or SIN_RUBRO
+        r = rubros.buscar(t.get("description")) or RUBRO_POR_TIPO.get(str(tipo)) or SIN_RUBRO
+        vistos.add(r)
+        if filtro and filtro not in norm(r):
+            continue
         dia = str(t.get("serviceDate") or "")[:10] or "sin fecha"
         _sumar(total, importe, unidades)
-        _sumar(por_rubro[rubro], importe, unidades)
+        _sumar(por_rubro[r], importe, unidades)
         _sumar(por_dia[dia], importe, unidades)
-        por_dia_rubro[dia][rubro] += importe
-        if rubro == SIN_RUBRO:
+        por_dia_rubro[dia][r] += importe
+        if agrupar == "producto":
+            _sumar(por_producto[r][producto(t, productos)], importe, unidades)
+        if r == SIN_RUBRO:
             _sumar(sin, importe, unidades)
         if importe < 0:
             anulaciones += 1
 
     out: dict[str, Any] = {"total": _redondear(total), "por_rubro": _por_importe(por_rubro)}
+    if rubro:
+        out["filtro_rubro"] = rubro
+        if not por_rubro:
+            out["aviso"] = (f"Ningún rubro contiene '{rubro}'. Rubros con extras en el periodo: "
+                            + (", ".join(sorted(vistos)) or "ninguno") + ".")
+    if agrupar == "producto":
+        for r, v in out["por_rubro"].items():
+            v["productos"] = _por_importe(por_producto[r])
     if agrupar in ("dia", "dia_y_rubro"):
         out["por_dia"] = {d: _redondear(v) for d, v in sorted(por_dia.items())}
     if agrupar == "dia_y_rubro":
@@ -386,7 +439,11 @@ def _merge(results: dict[str, dict[str, Any]], ordenar: dict[str, str]) -> dict[
 
 
 def merge_extras(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    return _merge(results, {"por_rubro": "importe"})
+    total = _merge(results, {"por_rubro": "importe"})
+    for v in (total.get("por_rubro") or {}).values():
+        if isinstance(v, dict) and isinstance(v.get("productos"), dict):
+            v["productos"] = _ordenar(v["productos"], "importe")
+    return total
 
 
 def merge_pagos(results: dict[str, dict[str, Any]]) -> dict[str, Any]:

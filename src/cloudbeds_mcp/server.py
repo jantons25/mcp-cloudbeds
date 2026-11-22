@@ -874,11 +874,13 @@ async def _catalogo(client: CloudbedsClient, clave: str, cargar: Callable[[], Aw
     return cache[key]
 
 
-async def _rubros(client: CloudbedsClient) -> fin.Catalogo:
-    async def cargar() -> fin.Catalogo:
+async def _items(client: CloudbedsClient) -> tuple[fin.Catalogo, fin.Catalogo]:
+    """Catálogo de ítems: (nombre -> rubro, nombre -> producto)."""
+    async def cargar() -> tuple[fin.Catalogo, fin.Catalogo]:
         body = await client.get("getItems", {"propertyID": client.settings.property_id})
-        return fin.catalogo_rubros([i for i in body.get("data") or [] if isinstance(i, dict)])
-    return await _catalogo(client, "rubros", cargar)
+        items = [i for i in body.get("data") or [] if isinstance(i, dict)]
+        return fin.catalogo_rubros(items), fin.catalogo_productos(items)
+    return await _catalogo(client, "items", cargar)
 
 
 async def _medios(client: CloudbedsClient) -> fin.Catalogo:
@@ -928,10 +930,13 @@ def _nota_truncado(truncado: bool) -> dict[str, str]:
     description=(
         "Extras y servicios cargados a las cuentas (desayunos, minibar, cafetería, lavandería, "
         "estacionamiento, productos y otros) por RUBRO (categoría de ítems de Cloudbeds) y, si se "
-        "pide, por día. Usa la fecha de servicio del cargo; fechas inclusivas, por defecto el mes "
-        "en curso, máximo 366 días. Las anulaciones restan. agrupar='rubro' (por defecto), 'dia' "
-        "o 'dia_y_rubro'. No incluye habitación (para eso, ingresos_periodo). Con hotel='red' "
-        "devuelve cada hotel y el total de la red."
+        "pide, por día o por PRODUCTO. Usa la fecha de servicio del cargo; fechas inclusivas, por "
+        "defecto el mes en curso, máximo 366 días. Las anulaciones restan. agrupar='rubro' (por "
+        "defecto), 'dia', 'dia_y_rubro' o 'producto' (cada rubro con el importe y las unidades de "
+        "cada producto). rubro='texto' limita la respuesta a los rubros cuyo nombre lo contiene "
+        "(p. ej. rubro='exhibidoras' con agrupar='producto' para el detalle de un rubro). No "
+        "incluye habitación (para eso, ingresos_periodo). Con hotel='red' devuelve cada hotel y "
+        "el total de la red."
     ),
     annotations=READ_ONLY,
     structured_output=False,
@@ -940,9 +945,15 @@ async def extras_periodo(
     fecha_desde: Annotated[str | None, _fecha_param("Primer día del periodo (incluido).")] = None,
     fecha_hasta: Annotated[str | None, _fecha_param("Último día del periodo (incluido).")] = None,
     agrupar: Annotated[
-        Literal["rubro", "dia", "dia_y_rubro"],
-        Field(description="rubro=total por rubro; dia=además el total de cada día; dia_y_rubro=además cada rubro por día."),
+        Literal["rubro", "dia", "dia_y_rubro", "producto"],
+        Field(description="rubro=total por rubro; dia=además el total de cada día; dia_y_rubro=además cada "
+                          "rubro por día; producto=además cada producto dentro de su rubro."),
     ] = "rubro",
+    rubro: Annotated[
+        str | None,
+        Field(description="Solo los rubros cuyo nombre contiene este texto (sin importar tildes ni mayúsculas).",
+              max_length=100),
+    ] = None,
     hotel: HotelRed = None,
 ) -> str:
     try:
@@ -952,14 +963,17 @@ async def extras_periodo(
 
     async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
         desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
-        rubros = await _rubros(client)
+        rubros, productos = await _items(client)
         result = await client.search_transactions(_filtro_servicio(desde, hasta))
         return {
             "periodo": _periodo_out(desde, hasta),
             "moneda": _moneda(client, result["data"]),
-            **fin.extras(result["data"], rubros, agrupar),
+            **fin.extras(result["data"], rubros, agrupar, productos, rubro),
             "notas": [
                 "Fecha = fecha de servicio del cargo. Rubro = categoría del ítem en Cloudbeds, reconocida por su nombre.",
+                *(["Producto = nombre del ítem en el catálogo de Cloudbeds. Un nombre que no está tal cual en el "
+                   "catálogo es un ítem renombrado; 'Sin identificar' agrupa los cargos que no coinciden con ningún ítem."]
+                  if agrupar == "producto" else []),
                 "Importes con impuestos tal como se cargaron a la cuenta; las anulaciones restan.",
             ],
             **_nota_truncado(result["truncado"]),

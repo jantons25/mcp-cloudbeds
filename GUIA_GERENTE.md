@@ -43,6 +43,7 @@ Red Zentra: **Zentra Balta, Zentra Plaza y Zentra San José**. Claude puede **le
 14. ¿Cuánto cobró **la red** esta semana por medio de pago, día por día?
 15. ¿Cuánto entró en Yape y en efectivo en **Balta** según el cierre de caja de ayer?
 16. Dame el resumen financiero de octubre de **San José**.
+17. ¿Qué productos de **A&B Exhibidoras** se vendieron en **Balta** este mes, con unidades?
 
 ## Consejos
 
@@ -51,7 +52,7 @@ Red Zentra: **Zentra Balta, Zentra Plaza y Zentra San José**. Claude puede **le
 - Si un hotel no responde, Claude te avisa que **el total de la red no lo incluye**. Ese total queda incompleto: no lo uses para reportes hasta revisarlo.
 - **Llegadas y salidas:** Claude distingue el total del día, las que ya se hicieron y las que siguen pendientes.
 - **Ingresos de habitación:** se muestran **sin impuestos (neto)** y **con impuestos (bruto)**. Solo incluyen habitación. Las cifras ya se compararon con los reportes de Cloudbeds.
-- **Extras:** se agrupan por los rubros de Cloudbeds (Minibar, Cafetería, A&B, Productos de Aseo, Otros…). Lo que no se puede clasificar aparece como "Sin clasificar", pero está en el total.
+- **Extras:** se agrupan por los rubros de Cloudbeds (Minibar, Cafetería, A&B, Productos de Aseo, Otros…). Lo que no se puede clasificar aparece como "Sin clasificar", pero está en el total. Para ver **qué productos** hay dentro de un rubro, pide "el detalle por producto" (importe y unidades de cada uno). Si un producto se renombró en Cloudbeds, puede aparecer con su nombre anterior (por ejemplo "Agua San Luis - EX").
 - **Pagos:** por defecto cuentan el día en que se registró el pago. Si quieres cuadrar con el **cierre de caja**, pídelo así: "según el cierre de caja" o "por día contable". Las dos cifras pueden ser muy distintas.
 - Por privacidad, el email, el teléfono y el documento de los huéspedes aparecen **ocultos** (por ejemplo `j***@g***.com`).
 - Cada consulta puede abarcar **hasta 1 año**. Las de ingresos de un año tardan alrededor de 1 minuto; para periodos largos, pregunta por trimestre.
