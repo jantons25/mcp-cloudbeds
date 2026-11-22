@@ -21,6 +21,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field, TypeAdapter, ValidationError
 
 from . import aggregations as agg
+from . import finanzas as fin
 from . import formatters as fmt
 from .client import CloudbedsClient
 from .config import Catalog, configure_logging, load_catalog, load_hotels
@@ -215,7 +216,8 @@ async def _lifespan(_: FastMCP) -> AsyncIterator[None]:
 def _instructions(catalog: Catalog | None) -> str:
     base = (
         "Consulta en modo SOLO LECTURA los datos de Cloudbeds (ocupación, llegadas, salidas, "
-        "reservas, disponibilidad, tarifas, habitaciones, housekeeping y canales). "
+        "reservas, disponibilidad, tarifas, habitaciones, housekeeping, canales, ingresos, extras "
+        "cargados a las cuentas, pagos recibidos y resumen financiero). "
         "Los montos están en la moneda de cada hotel. Las fechas son YYYY-MM-DD en la zona horaria "
         "de cada hotel (por defecto America/Lima). Responde en español. Los datos personales de "
         "huéspedes pueden venir enmascarados."
@@ -852,6 +854,219 @@ async def ingresos_periodo(
 
     try:
         return await _run(hotel, consulta, agg.merge_revenue)
+    except _ERRORS as exc:
+        return _error(exc)
+
+
+# ---------- extras, pagos y resumen financiero (API contable) ----------
+
+# En la API contable el día contable puede diferir del día del pago (cierre de caja): para
+# contarlos por día contable se pide un margen de días a cada lado y luego se filtra.
+MARGEN_DIA_CONTABLE = 3
+
+
+async def _catalogo(client: CloudbedsClient, clave: str, cargar: Callable[[], Awaitable[Any]]) -> Any:
+    """Catálogos que cambian poco (ítems, medios de pago): se guardan un día por hotel."""
+    key = (client.settings.hotel_alias, clave, _today(client.settings.tz))
+    cache = _get_registry().cache
+    if key not in cache:
+        cache[key] = await cargar()
+    return cache[key]
+
+
+async def _rubros(client: CloudbedsClient) -> fin.Catalogo:
+    async def cargar() -> fin.Catalogo:
+        body = await client.get("getItems", {"propertyID": client.settings.property_id})
+        return fin.catalogo_rubros([i for i in body.get("data") or [] if isinstance(i, dict)])
+    return await _catalogo(client, "rubros", cargar)
+
+
+async def _medios(client: CloudbedsClient) -> fin.Catalogo:
+    async def cargar() -> fin.Catalogo:
+        body = await client.get("getPaymentMethods", {"propertyID": client.settings.property_id, "lang": "es"})
+        data = body.get("data") or {}
+        metodos = data.get("methods") if isinstance(data, dict) else None
+        return fin.catalogo_medios([m for m in metodos or [] if isinstance(m, dict)])
+    return await _catalogo(client, "medios", cargar)
+
+
+def _filtro_servicio(desde: date, hasta: date) -> dict[str, Any]:
+    return {"and": [
+        {"field": "service_date", "operator": "greater_than_or_equal", "value": desde.isoformat()},
+        {"field": "service_date", "operator": "less_than_or_equal", "value": hasta.isoformat()},
+    ]}
+
+
+def _filtro_transaccion(desde: date, hasta: date, tz: ZoneInfo, margen: int = 0) -> dict[str, Any]:
+    """Rango de transaction_datetime en UTC que cubre los días [desde, hasta] del hotel."""
+    utc = ZoneInfo("UTC")
+    inicio = datetime.combine(desde - timedelta(days=margen), datetime.min.time(), tz).astimezone(utc)
+    fin_ = datetime.combine(hasta + timedelta(days=1 + margen), datetime.min.time(), tz).astimezone(utc)
+    z = "%Y-%m-%dT%H:%M:%SZ"
+    return {"and": [
+        {"field": "transaction_datetime", "operator": "greater_than_or_equal", "value": inicio.strftime(z)},
+        {"field": "transaction_datetime", "operator": "less_than", "value": fin_.strftime(z)},
+    ]}
+
+
+def _moneda(client: CloudbedsClient, transacciones: list[dict[str, Any]]) -> str | None:
+    return next((str(t["currency"]) for t in transacciones if t.get("currency")), None) or client.settings.currency
+
+
+def _periodo_out(desde: date, hasta: date) -> dict[str, Any]:
+    return {"desde": desde.isoformat(), "hasta": hasta.isoformat(), "dias": (hasta - desde).days + 1}
+
+
+def _nota_truncado(truncado: bool) -> dict[str, str]:
+    if not truncado:
+        return {}
+    return {"advertencia": "Se alcanzó el tope de transacciones por consulta: las cifras están INCOMPLETAS. Acorta el periodo."}
+
+
+@mcp.tool(
+    title="Extras del periodo",
+    description=(
+        "Extras y servicios cargados a las cuentas (desayunos, minibar, cafetería, lavandería, "
+        "estacionamiento, productos y otros) por RUBRO (categoría de ítems de Cloudbeds) y, si se "
+        "pide, por día. Usa la fecha de servicio del cargo; fechas inclusivas, por defecto el mes "
+        "en curso, máximo 366 días. Las anulaciones restan. agrupar='rubro' (por defecto), 'dia' "
+        "o 'dia_y_rubro'. No incluye habitación (para eso, ingresos_periodo). Con hotel='red' "
+        "devuelve cada hotel y el total de la red."
+    ),
+    annotations=READ_ONLY,
+    structured_output=False,
+)
+async def extras_periodo(
+    fecha_desde: Annotated[str | None, _fecha_param("Primer día del periodo (incluido).")] = None,
+    fecha_hasta: Annotated[str | None, _fecha_param("Último día del periodo (incluido).")] = None,
+    agrupar: Annotated[
+        Literal["rubro", "dia", "dia_y_rubro"],
+        Field(description="rubro=total por rubro; dia=además el total de cada día; dia_y_rubro=además cada rubro por día."),
+    ] = "rubro",
+    hotel: HotelRed = None,
+) -> str:
+    try:
+        _period(fecha_desde, fecha_hasta, _UTC)
+    except ValueError as exc:
+        return str(exc)
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
+        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
+        rubros = await _rubros(client)
+        result = await client.search_transactions(_filtro_servicio(desde, hasta))
+        return {
+            "periodo": _periodo_out(desde, hasta),
+            "moneda": _moneda(client, result["data"]),
+            **fin.extras(result["data"], rubros, agrupar),
+            "notas": [
+                "Fecha = fecha de servicio del cargo. Rubro = categoría del ítem en Cloudbeds, reconocida por su nombre.",
+                "Importes con impuestos tal como se cargaron a la cuenta; las anulaciones restan.",
+            ],
+            **_nota_truncado(result["truncado"]),
+        }
+
+    try:
+        return await _run(hotel, consulta, fin.merge_extras)
+    except _ERRORS as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    title="Pagos del periodo",
+    description=(
+        "Pagos recibidos (cobro real) por MEDIO DE PAGO (efectivo, tarjetas, transferencia, Yape, "
+        "Plin, etc.) y, si se pide, por día. 'neto' es el cobro real; también informa lo "
+        "registrado, lo anulado (pagos mal cargados que se anularon) y lo devuelto. "
+        "fecha='pago' (por defecto) cuenta cada pago el día en que se registró; fecha='contable' "
+        "lo cuenta en el día contable del cierre de caja (pueden diferir en pagos de madrugada). "
+        "agrupar='medio' (por defecto), 'dia' o 'dia_y_medio'. Fechas inclusivas, por defecto el "
+        "mes en curso, máximo 366 días. Con hotel='red' devuelve cada hotel y el total de la red."
+    ),
+    annotations=READ_ONLY,
+    structured_output=False,
+)
+async def pagos_periodo(
+    fecha_desde: Annotated[str | None, _fecha_param("Primer día del periodo (incluido).")] = None,
+    fecha_hasta: Annotated[str | None, _fecha_param("Último día del periodo (incluido).")] = None,
+    agrupar: Annotated[
+        Literal["medio", "dia", "dia_y_medio"],
+        Field(description="medio=total por medio de pago; dia=además el total de cada día; dia_y_medio=además cada medio por día."),
+    ] = "medio",
+    fecha: Annotated[
+        Literal["pago", "contable"],
+        Field(description="pago=día en que se registró el pago; contable=día contable del cierre de caja."),
+    ] = "pago",
+    hotel: HotelRed = None,
+) -> str:
+    try:
+        _period(fecha_desde, fecha_hasta, _UTC)
+    except ValueError as exc:
+        return str(exc)
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
+        tz = client.settings.tz
+        desde, hasta = _period(fecha_desde, fecha_hasta, tz)
+        medios = await _medios(client)
+        margen = MARGEN_DIA_CONTABLE if fecha == "contable" else 0
+        result = await client.search_transactions(_filtro_transaccion(desde, hasta, tz, margen))
+        return {
+            "periodo": _periodo_out(desde, hasta),
+            "criterio_fecha": "día contable (cierre de caja)" if fecha == "contable" else "día en que se registró el pago (hora del hotel)",
+            "moneda": _moneda(client, result["data"]),
+            **fin.pagos(result["data"], medios, desde, hasta, fecha, tz, agrupar),
+            "notas": [
+                "Medio de pago reconocido por la descripción del pago, comparada con los medios configurados en Cloudbeds.",
+                "neto = cobro real. registrado = pagos ingresados; anulado = pagos anulados después (códigos que terminan en V, p. ej. un pago mal cargado); devuelto = reembolsos y otros ajustes. neto = registrado - anulado - devuelto.",
+            ],
+            **_nota_truncado(result["truncado"]),
+        }
+
+    try:
+        return await _run(hotel, consulta, fin.merge_pagos)
+    except _ERRORS as exc:
+        return _error(exc)
+
+
+@mcp.tool(
+    title="Resumen financiero",
+    description=(
+        "Reporte financiero del periodo según la fecha de servicio: cargos por tipo (habitación, "
+        "productos y servicios, complementos, impuestos, cargos adicionales…) con su desglose por "
+        "código contable de Cloudbeds, pagos aplicados y la diferencia cargos - pagos. Fechas "
+        "inclusivas, por defecto el mes en curso, máximo 366 días. Para el detalle de extras por "
+        "rubro usa extras_periodo; para cobros por medio de pago, pagos_periodo. Con hotel='red' "
+        "devuelve cada hotel y el total de la red."
+    ),
+    annotations=READ_ONLY,
+    structured_output=False,
+)
+async def resumen_financiero(
+    fecha_desde: Annotated[str | None, _fecha_param("Primer día del periodo (incluido).")] = None,
+    fecha_hasta: Annotated[str | None, _fecha_param("Último día del periodo (incluido).")] = None,
+    hotel: HotelRed = None,
+) -> str:
+    try:
+        _period(fecha_desde, fecha_hasta, _UTC)
+    except ValueError as exc:
+        return str(exc)
+
+    async def consulta(client: CloudbedsClient, red: bool) -> dict[str, Any]:
+        desde, hasta = _period(fecha_desde, fecha_hasta, client.settings.tz)
+        result = await client.search_transactions(_filtro_servicio(desde, hasta))
+        return {
+            "periodo": _periodo_out(desde, hasta),
+            "moneda": _moneda(client, result["data"]),
+            **fin.resumen_financiero(result["data"]),
+            "notas": [
+                "Todos los movimientos con fecha de servicio en el periodo, tal como están en la contabilidad de Cloudbeds.",
+                "Habitación: código 1000 = tarifa sin impuestos; 8000 = impuesto de la tarifa (cuadra con ingresos_periodo).",
+                "pagos_aplicados usa la fecha de servicio; para el cobro real por día usa pagos_periodo.",
+            ],
+            **_nota_truncado(result["truncado"]),
+        }
+
+    try:
+        return await _run(hotel, consulta, fin.merge_financiero)
     except _ERRORS as exc:
         return _error(exc)
 

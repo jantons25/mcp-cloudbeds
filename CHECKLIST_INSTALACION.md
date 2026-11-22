@@ -45,7 +45,7 @@ La hace Tecnología junto con el gerente. Tiempo estimado: 30 minutos. Marca cad
 
 - [ ] `scripts\configurar_claude.py` muestra la ruta del config detectada. Revísala y luego ejecuta `scripts\configurar_claude.py --aplicar`.
 - [ ] Cierra Claude por completo: **clic derecho en el ícono de la bandeja → Salir** (en macOS, Cmd+Q). Vuelve a abrirlo.
-- [ ] En un chat nuevo aparecen las herramientas de **cloudbeds** (14 en total, incluida `hoteles`).
+- [ ] En un chat nuevo aparecen las herramientas de **cloudbeds** (17 en total, incluida `hoteles`).
 - [ ] "¿Qué hoteles tienes?" lista Zentra Balta, Zentra Plaza y Zentra San José.
 - [ ] "¿Cómo va el día de hoy?" **pregunta de qué hotel**.
 - [ ] "¿Cómo va hoy Balta?" y "¿Cuántas llegadas tiene San José hoy?" devuelven datos que coinciden con el dashboard de cada hotel.

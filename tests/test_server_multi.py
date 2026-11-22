@@ -8,7 +8,7 @@ import pytest
 import respx
 
 from cloudbeds_mcp import config, server
-from cloudbeds_mcp.client import BASE_URL, CloudbedsClient
+from cloudbeds_mcp.client import ACCOUNTING_URL, BASE_URL, CloudbedsClient
 from cloudbeds_mcp.config import Catalog, Hotel, HotelEntry, HotelsConfig, Settings, keyring_user
 from cloudbeds_mcp.hotels import HotelRegistry
 
@@ -57,7 +57,7 @@ def ok(data=None, total=None):
     return body
 
 
-# Las 13 herramientas con los argumentos mínimos para llamarlas.
+# Las 16 herramientas con los argumentos mínimos para llamarlas.
 TOOLS = [
     (server.estado_hotel, {}),
     (server.buscar_reservas, {}),
@@ -72,10 +72,14 @@ TOOLS = [
     (server.resumen_dia, {}),
     (server.resumen_periodo, {}),
     (server.ingresos_periodo, {}),
+    (server.extras_periodo, {}),
+    (server.pagos_periodo, {}),
+    (server.resumen_financiero, {}),
 ]
 TOOL_IDS = [t.__name__ for t, _ in TOOLS]
 # Herramientas que aceptan hotel="red" (fase 4); el resto son de un solo hotel.
-RED_TOOLS = {"estado_hotel", "buscar_reservas", "resumen_dia", "resumen_periodo", "ingresos_periodo"}
+RED_TOOLS = {"estado_hotel", "buscar_reservas", "resumen_dia", "resumen_periodo", "ingresos_periodo",
+             "extras_periodo", "pagos_periodo", "resumen_financiero"}
 UNO = [(t, k) for t, k in TOOLS if t.__name__ not in RED_TOOLS]
 UNO_IDS = [t.__name__ for t, _ in UNO]
 
@@ -123,11 +127,16 @@ async def test_todas_las_herramientas_etiquetan_el_hotel(registry, api):
     for endpoint in ("getReservations", "getRoomTypes", "getRooms", "getHousekeepingStatus",
                      "getReservationsWithRateDetails"):
         api.get(endpoint).respond(200, json=ok([], total=0))
+    api.get("getItems").respond(200, json=ok([]))
+    api.get("getPaymentMethods").respond(200, json=ok({"methods": []}))
+    api.post(ACCOUNTING_URL + "transactions").respond(200, json={"transactions": []})
     for tool, kwargs in TOOLS:
         out = json.loads(await tool(**kwargs, hotel="plaza"))
         assert out["hotel"] == {"alias": "plaza", "nombre": "Zentra Plaza"}, tool.__name__
-    sent_keys = {c.request.headers["x-api-key"] for c in api.calls}
+    sent_keys = {c.request.headers["x-api-key"] for c in api.calls if "x-api-key" in c.request.headers}
     assert sent_keys == {KEYS["plaza"]}
+    contables = [c.request for c in api.calls if c.request.method == "POST"]
+    assert contables and {r.headers["Authorization"] for r in contables} == {f"Bearer {KEYS['plaza']}"}
 
 
 @pytest.mark.parametrize(("texto", "tz"), [("balta", TZ_BALTA), ("plaza", TZ_PLAZA)])

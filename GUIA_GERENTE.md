@@ -39,6 +39,10 @@ Red Zentra: **Zentra Balta, Zentra Plaza y Zentra San José**. Claude puede **le
 10. ¿Qué canal nos trajo más reservas este mes en **toda la red**?
 11. ¿Cuántas cancelaciones y no-show hubo la semana pasada en **Balta**?
 12. Compara la ocupación de este mes de **los tres hoteles**.
+13. ¿Cuánto vendió **Plaza** en extras ayer, por rubro?
+14. ¿Cuánto cobró **la red** esta semana por medio de pago, día por día?
+15. ¿Cuánto entró en Yape y en efectivo en **Balta** según el cierre de caja de ayer?
+16. Dame el resumen financiero de octubre de **San José**.
 
 ## Consejos
 
@@ -46,7 +50,9 @@ Red Zentra: **Zentra Balta, Zentra Plaza y Zentra San José**. Claude puede **le
 - **La red** muestra el total y el detalle de cada hotel. Los porcentajes de la red (ocupación, ADR, RevPAR) se calculan sobre el total, no como promedio de los hoteles.
 - Si un hotel no responde, Claude te avisa que **el total de la red no lo incluye**. Ese total queda incompleto: no lo uses para reportes hasta revisarlo.
 - **Llegadas y salidas:** Claude distingue el total del día, las que ya se hicieron y las que siguen pendientes.
-- **Ingresos:** se muestran **sin impuestos (neto)** y **con impuestos (bruto)**. Solo incluyen habitación: sin extras ni pagos. Las cifras ya se compararon con los reportes de Cloudbeds.
+- **Ingresos de habitación:** se muestran **sin impuestos (neto)** y **con impuestos (bruto)**. Solo incluyen habitación. Las cifras ya se compararon con los reportes de Cloudbeds.
+- **Extras:** se agrupan por los rubros de Cloudbeds (Minibar, Cafetería, A&B, Productos de Aseo, Otros…). Lo que no se puede clasificar aparece como "Sin clasificar", pero está en el total.
+- **Pagos:** por defecto cuentan el día en que se registró el pago. Si quieres cuadrar con el **cierre de caja**, pídelo así: "según el cierre de caja" o "por día contable". Las dos cifras pueden ser muy distintas.
 - Por privacidad, el email, el teléfono y el documento de los huéspedes aparecen **ocultos** (por ejemplo `j***@g***.com`).
 - Cada consulta puede abarcar **hasta 1 año**. Las de ingresos de un año tardan alrededor de 1 minuto; para periodos largos, pregunta por trimestre.
 - Si una respuesta te parece rara, pídele a Claude: "muéstrame en qué datos te basaste".

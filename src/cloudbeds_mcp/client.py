@@ -1,7 +1,8 @@
-"""Cliente HTTP de SOLO LECTURA para la API v1.3 de Cloudbeds.
+"""Cliente HTTP de SOLO LECTURA para la API v1.3 y la API contable de Cloudbeds.
 
-- Solo existe `get` / `get_all`; no hay métodos de escritura.
-- Solo se permiten los endpoints de ALLOWED_ENDPOINTS.
+- Solo existen `get` / `get_all` y `search_transactions`; no hay métodos de escritura.
+- Solo se permiten los endpoints de ALLOWED_ENDPOINTS (GET) y las búsquedas de
+  ALLOWED_QUERIES: POST que solo consultan, nombrados uno por uno.
 - Token bucket a 4 req/s (el límite de Cloudbeds es 5 req/s).
 - Reintentos: 429 respeta Retry-After + jitter; 5xx/timeout con backoff exponencial.
 - Valida `success: false` aunque llegue con HTTP 200.
@@ -41,7 +42,16 @@ ALLOWED_ENDPOINTS: dict[str, str | None] = {
     "getSources": "read:reservation",
     "getRatePlans": "read:rate",
     "getReservationsWithRateDetails": "read:reservation",
+    "getItems": "read:item",
+    "getPaymentMethods": "read:payment",
 }
+
+# API contable: búsquedas por POST que SOLO LEEN (verificado contra la API real, nov-2026).
+# Cualquier otra ruta o método de esta API está prohibido.
+ACCOUNTING_URL = "https://api.cloudbeds.com/accounting/v1.0/"
+ALLOWED_QUERIES: dict[str, str] = {"transactions": "read:payment"}
+ACCOUNTING_PAGE_SIZE = 1100  # máximo que admite Cloudbeds
+ACCOUNTING_MAX_RESULTS = 50_000  # tope de transacciones por consulta (~1 año de un hotel)
 
 REQUESTS_PER_SECOND = 4.0
 TIMEOUT_SECONDS = 15.0
@@ -103,8 +113,15 @@ def _parse_retry_after(value: str | None) -> float:
 _SCOPE_WORDS = ("scope", "permission", "not authorized", "unauthorized", "access denied", "access_denied", "forbidden")
 
 
+def _detail(body: Any) -> str | None:
+    """Motivo del rechazo: v1.3 usa 'message'; la API contable, 'errorDetails'."""
+    if not isinstance(body, dict):
+        return None
+    return body.get("message") or body.get("errorDetails") or body.get("error")
+
+
 def _scope_hint(endpoint: str) -> str:
-    scope = ALLOWED_ENDPOINTS.get(endpoint)
+    scope = ALLOWED_ENDPOINTS.get(endpoint) or ALLOWED_QUERIES.get(endpoint)
     if scope:
         return f" Es probable que a la API key le falte el scope '{scope}'; los scopes no se agregan a una key existente, hay que recrearla."
     return ""
@@ -160,15 +177,50 @@ class CloudbedsClient:
             # distinto de "0" (incluido "false"), así que los booleanos van como "1"/"0".
             if isinstance(value, bool):
                 clean[key] = "1" if value else "0"
+        return await self._request("GET", endpoint, endpoint, params=clean)
 
+    async def search_transactions(
+        self, filters: dict[str, Any], *, max_results: int = ACCOUNTING_MAX_RESULTS
+    ) -> dict[str, Any]:
+        """Busca transacciones en la API contable (POST que solo lee) y recorre todas las páginas.
+
+        `filters` sigue el formato de Cloudbeds ({"and": [{"field", "operator", "value"}, ...]}).
+        Devuelve {"data": [...], "truncado": bool}.
+        """
+        if not self.settings.property_id:
+            raise CloudbedsError("Falta el propertyID del hotel para consultar la API contable.")
+        url = ACCOUNTING_URL + "transactions"
+        headers = {"Authorization": f"Bearer {self.settings.api_key}", "X-Property-ID": self.settings.property_id}
+        items: list[dict[str, Any]] = []
+        token: str | None = None
+        while True:
+            body: dict[str, Any] = {"filters": filters, "limit": ACCOUNTING_PAGE_SIZE}
+            if token:
+                body["pageToken"] = token
+            data = await self._request("POST", url, "transactions", json=body, headers=headers)
+            page = data.get("transactions") if isinstance(data, dict) else None
+            if not isinstance(page, list):
+                raise CloudbedsError("Respuesta inesperada de la API contable: falta la lista 'transactions'.")
+            items.extend(t for t in page if isinstance(t, dict))
+            token = data.get("nextPageToken")
+            if len(items) >= max_results:
+                return {"data": items[:max_results], "truncado": bool(token) or len(items) > max_results}
+            if not token or not page:
+                return {"data": items, "truncado": False}
+
+    async def _request(self, method: str, url: str, label: str, **kwargs: Any) -> Any:
+        """Envía la petición con límite de velocidad y reintentos, y valida la respuesta.
+
+        Solo la llaman `get` (endpoints de la lista blanca) y `search_transactions`.
+        """
         attempt = 0
         while True:
             await self._limiter.acquire()
             start = time.perf_counter()
             try:
-                response = await self._http.get(endpoint, params=clean)
+                response = await self._http.request(method, url, **kwargs)
             except httpx.TimeoutException:
-                self._log(endpoint, "timeout", None, start, None)
+                self._log(label, "timeout", None, start, None)
                 if attempt < MAX_RETRIES:
                     await self._sleep(BACKOFF_SECONDS[attempt])
                     attempt += 1
@@ -177,7 +229,7 @@ class CloudbedsClient:
                     "Cloudbeds no respondió a tiempo tras varios intentos. Intenta de nuevo en unos minutos."
                 ) from None
             except httpx.HTTPError as exc:
-                self._log(endpoint, "error_red", None, start, None)
+                self._log(label, "error_red", None, start, None)
                 raise CloudbedsError(
                     f"No se pudo conectar con Cloudbeds ({type(exc).__name__}). Revisa la conexión a internet."
                 ) from None
@@ -186,7 +238,7 @@ class CloudbedsClient:
             status = response.status_code
 
             if status == 429:
-                self._log(endpoint, status, None, start, request_id)
+                self._log(label, status, None, start, request_id)
                 if attempt < MAX_RETRIES:
                     wait = _parse_retry_after(response.headers.get("Retry-After"))
                     await self._sleep(wait + random.uniform(0, MAX_JITTER))
@@ -198,7 +250,7 @@ class CloudbedsClient:
                 )
 
             if status >= 500:
-                self._log(endpoint, status, None, start, request_id)
+                self._log(label, status, None, start, request_id)
                 if attempt < MAX_RETRIES:
                     await self._sleep(BACKOFF_SECONDS[attempt])
                     attempt += 1
@@ -210,7 +262,7 @@ class CloudbedsClient:
 
             body = self._json(response)
             success = body.get("success") if isinstance(body, dict) else None
-            self._log(endpoint, status, success, start, request_id)
+            self._log(label, status, success, start, request_id)
 
             if status == 401:
                 raise AuthError(
@@ -220,11 +272,11 @@ class CloudbedsClient:
                 )
             if status == 403:
                 raise CloudbedsError(
-                    "Cloudbeds denegó el acceso a esta consulta." + _scope_hint(endpoint),
+                    "Cloudbeds denegó el acceso a esta consulta." + _scope_hint(label),
                     request_id=request_id,
                 )
             if status >= 400:
-                detail = translate_message(body.get("message") if isinstance(body, dict) else None)
+                detail = translate_message(_detail(body))
                 raise CloudbedsError(f"Petición rechazada (HTTP {status}). {detail}", request_id=request_id)
 
             if body is None:
@@ -235,7 +287,7 @@ class CloudbedsClient:
                 message = body.get("message")
                 text = translate_message(message)
                 if any(w in str(message).lower() for w in _SCOPE_WORDS):
-                    text += _scope_hint(endpoint)
+                    text += _scope_hint(label)
                 raise CloudbedsError(text, request_id=request_id)
             return body
 

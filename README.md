@@ -1,12 +1,12 @@
 # cloudbeds-mcp
 
-Servidor MCP local (stdio) en Python que permite a Claude Desktop **leer** datos de Cloudbeds (solo GET) de uno o varios hoteles. Hoy atiende la red Zentra: **Zentra Balta, Zentra Plaza y Zentra San José**.
+Servidor MCP local (stdio) en Python que permite a Claude Desktop **leer** datos de Cloudbeds (solo lectura) de uno o varios hoteles: operación, ingresos, extras cargados a las cuentas, pagos recibidos y un resumen financiero. Hoy atiende la red Zentra: **Zentra Balta, Zentra Plaza y Zentra San José**.
 
 ## Requisitos
 
 - Python 3.10 o superior
 - Git, para instalar y actualizar con `git clone` / `git pull`
-- Una API key de Cloudbeds por hotel, con los scopes `read:hotel`, `read:dashboard`, `read:reservation`, `read:room`, `read:housekeeping` y `read:rate`. Una misma key que vea varias propiedades también sirve.
+- Una API key de Cloudbeds con los scopes `read:hotel`, `read:dashboard`, `read:reservation`, `read:room`, `read:housekeeping`, `read:rate`, `read:item` y `read:payment`. Puede ser una key por hotel o una sola key de organización que vea las tres propiedades (por ejemplo, una credencial de tipo "Accounting & Finance" habilitada para toda la organización).
 
 ## Instalación
 
@@ -124,6 +124,9 @@ La columna **Red** indica si la herramienta acepta `hotel="red"` y devuelve el t
 | `resumen_dia` | ✅ | Ocupación del día, llegadas y salidas (total, ya realizadas, pendientes), no-show, cancelaciones y lista corta |
 | `resumen_periodo` | ✅ | Reservas del periodo por estado, fuente y tipo de habitación, noches, estancia media y cancelaciones. `criterio`: `checkin` (llegadas del periodo) o `creacion` (reservas hechas en el periodo) |
 | `ingresos_periodo` | ✅ | Ingresos de habitación por fecha de estadía: bruto y neto, ADR, ocupación, RevPAR y desglose por fuente y por tipo |
+| `extras_periodo` | ✅ | Extras cargados a las cuentas (minibar, cafetería, lavandería, productos…) por **rubro** (categoría de ítems de Cloudbeds) y, con `agrupar`, por día. Fecha de servicio |
+| `pagos_periodo` | ✅ | Pagos recibidos por **medio de pago** (efectivo, tarjetas, transferencia, Yape, Plin…) y, con `agrupar`, por día; anulaciones y devoluciones aparte. `fecha`: `pago` (día en que se registró) o `contable` (día del cierre de caja) |
+| `resumen_financiero` | ✅ | Cargos por tipo (habitación, productos y servicios, complementos, impuestos…) con desglose por código contable, pagos aplicados y diferencia cargos - pagos. Fecha de servicio |
 
 ### Respuestas de la red
 
@@ -154,7 +157,12 @@ La columna **Red** indica si la herramienta acepta `hotel="red"` y devuelve el t
 | ADR | Ingreso ÷ noches vendidas (se informa bruto y neto) |
 | Ocupación / RevPAR | Noches vendidas ÷ (habitaciones del inventario × días). No se descuentan las habitaciones bloqueadas |
 | Excluidas | Canceladas y no-show: en Cloudbeds tienen `total = 0` aunque conserven tarifas |
-| No incluye | Extras o productos, pagos, cobros ni impuestos por separado |
+| No incluye (`ingresos_periodo`) | Extras o productos, pagos, cobros ni impuestos por separado: para eso están `extras_periodo`, `pagos_periodo` y `resumen_financiero` |
+| Extras (`extras_periodo`) | Movimientos de la contabilidad de Cloudbeds de tipo ítem, POS o complemento, por **fecha de servicio**. Importes con impuestos, tal como se cargaron a la cuenta. Las anulaciones restan |
+| Rubro | Categoría del ítem en Cloudbeds, reconocida por el **nombre** del ítem (la API no trae el id del catálogo). Lo que no coincide va a "Sin clasificar" y está incluido en el total |
+| Pagos (`pagos_periodo`) | Movimientos de tipo pago. **`neto` = cobro real** = `registrado` (pagos ingresados) - `anulado` (pagos anulados después: códigos que terminan en V, siempre con su pago original en la misma reserva) - `devuelto` (reembolsos y otros ajustes). Con datos reales, casi todo lo que separa lo registrado del neto son anulaciones; las devoluciones verdaderas son raras. Medio de pago reconocido por la descripción del pago frente a los medios configurados en Cloudbeds; lo que no coincide va a "No identificado" |
+| Día de un pago | `fecha="pago"`: día (hora del hotel) en que se registró. `fecha="contable"`: día contable que le asignó el cierre de caja. Pueden diferir mucho (verificado con datos reales: en un mismo día la diferencia superó el 70 %) |
+| Habitación en `resumen_financiero` | Código 1000 = tarifa sin impuestos; 8000 = impuesto. Cuadra con `ingresos_periodo` (verificado al centavo con datos reales) |
 | Llegadas del día (`resumen_dia`) | Reservas con check-in ese día, excluidas canceladas y no-show (que se informan aparte) |
 | Noches (`resumen_periodo`, criterio `checkin`) | Estadía completa de las reservas que llegan en el periodo, aunque salgan después |
 | Ocupación de la red | Suma de habitaciones ocupadas ÷ suma de habitaciones del inventario de los hoteles incluidos |
@@ -165,7 +173,9 @@ Rendimiento: `getReservationsWithRateDetails` tarda unos 4.5 s por página de 10
 
 > **Tarifas:** en `disponibilidad` y `planes_tarifa`, Cloudbeds entrega el **total de la estadía** (verificado: 3 noches × 135 = 405). El servidor calcula también el promedio por noche.
 
-> **Scopes:** si a la key le falta un scope, la herramienta responde cuál falta (`read:room`, `read:housekeeping`, `read:rate`, `read:reservation`, `read:dashboard`). Los scopes no se pueden agregar a una key existente: hay que crear una nueva.
+> **Scopes:** si a la key le falta un scope, la herramienta responde cuál falta (`read:room`, `read:housekeeping`, `read:rate`, `read:reservation`, `read:dashboard`, `read:item`, `read:payment`). Los scopes no se pueden agregar a una key existente: hay que crear una nueva. En la pantalla de Cloudbeds (Marketplace → Integraciones de API y Credenciales) no se eligen scopes: solo nombre, tipo de integración, URI y si vale para toda la organización.
+
+> **API contable:** extras, pagos y resumen financiero usan `POST /accounting/v1.0/transactions`, una **búsqueda que solo lee**. Es la única ruta POST permitida (`ALLOWED_QUERIES` en `client.py`); cualquier otro POST está bloqueado.
 
 > **Llegadas y salidas:** el dashboard de Cloudbeds (`getDashboard`) cuenta solo las llegadas y salidas que **aún no** hicieron check-in o check-out. El total del día (incluidas las ya realizadas) se obtiene con `buscar_reservas` filtrando por la fecha. Claude está instruido para mostrar las dos cifras.
 
@@ -260,7 +270,7 @@ Se registra **una sola** entrada `cloudbeds`, que atiende a todos los hoteles. P
 
 ### 3. Reiniciar Claude Desktop por completo
 
-Cierra también el ícono de la bandeja del sistema (Windows) o usa Cmd+Q (macOS) y vuelve a abrir la app. En una conversación nueva deben aparecer las 14 herramientas de `cloudbeds`.
+Cierra también el ícono de la bandeja del sistema (Windows) o usa Cmd+Q (macOS) y vuelve a abrir la app. En una conversación nueva deben aparecer las 17 herramientas de `cloudbeds`.
 
 La lista de hoteles se lee **al arrancar** el servidor. Después de agregar o quitar un hotel, reinicia Claude Desktop desde la bandeja.
 
@@ -368,4 +378,9 @@ Si la hora es anterior al cambio, sal desde la bandeja (clic derecho → Salir) 
 - Toma como **verdadero** cualquier booleano distinto de `0`, incluido el texto `"false"`. Por eso el servidor envía los booleanos como `1`/`0`, y `estado_housekeeping` filtra en el propio servidor.
 - `getHousekeepingStatus` informa un `total` incorrecto. Se cuentan los elementos reales.
 - `getSources` devuelve `data` como lista de listas.
+- API contable: `amount` ya viene en soles (169.64); `currencyScale` es la cantidad de decimales, no un divisor. Los pagos son negativos.
+- API contable: `external_relation_kind` solo se acepta junto con `external_relation_id`, y `business_date` no sirve como único filtro. Los pagos se buscan por rango de `transaction_datetime` y se filtran en el servidor.
+- API contable: `externalRelationId` de un ítem es el id del movimiento, no el del catálogo (`getItems`). El medio de pago no tiene campo propio y el código interno no alcanza (9000 mezcla débito y Yape).
+- `getTransactions` y `getPayments` no existen en la API v1.3 (404).
+- La API de Insights (`/datainsights/v1.1/`) lista los datasets con la key, pero las consultas devuelven 403 ("User does not have permission to VIEW report"): la cuenta no tiene informes personalizados.
 - `getDashboard` devuelve llegadas y salidas como texto, y cuenta solo las **pendientes**.

@@ -16,7 +16,7 @@ Para la matriz de accesos del Plan Maestro. Se llena **una tabla por cada key**,
 | Sistema que la usa | MCP local de Claude Desktop (`cloudbeds-mcp`), **solo lectura** |
 | Propiedad | ✅ nombre, propertyID, moneda y zona horaria (los muestra `scripts/agregar_hotel.py`) |
 | Cuenta creadora (autorizó la conexión) | ✅ la muestra `agregar_hotel.py` / `smoke_test.py` (según `userinfo`). Debe ser una cuenta **institucional**: si una cuenta personal se desactiva, la key deja de funcionar |
-| Scopes mínimos | `read:hotel`, `read:dashboard`, `read:reservation`, `read:room`, `read:housekeeping`, `read:rate` |
+| Scopes que usa el MCP | `read:hotel`, `read:dashboard`, `read:reservation`, `read:room`, `read:housekeeping`, `read:rate`, `read:item`, `read:payment`. En Cloudbeds no se eligen al crear la credencial: se verifican con `scripts/sondear_api.py` y `smoke_test.py` |
 | Scopes de escritura | ✏️ Confirmar en Cloudbeds que la key **no** tiene ningún `write:*` ni `delete:*`. El servidor nunca escribe (allowlist de GET), pero el mínimo privilegio se aplica en la key |
 | Fecha de creación | ✏️ |
 | Dónde está guardada | Administrador de credenciales (Windows) o Llavero (macOS) de esa PC: servicio `cloudbeds-mcp`, usuario `CLOUDBEDS_API_KEY:<alias>`. Nunca en `.env`, `hoteles.json`, el código ni un chat |

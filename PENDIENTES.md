@@ -10,12 +10,17 @@ Contexto para continuar en un chat nuevo. El plan original está en `D:\Juanjo\D
   - Los hoteles se reconocen por su nombre corto, y "la red" agrupa a los tres.
   - Si el usuario no dice el hotel, Claude pregunta.
   - El gerente actualiza con `actualizar.bat` (`git pull`).
-- **Tests:** 352 tests pasan, con cobertura del 98 %. Hay 14 herramientas, incluida `hoteles`.
+- **Tests:** 408 tests pasan, con cobertura del 98 %. Hay 17 herramientas, incluida `hoteles`.
+- **Extras, pagos y resumen financiero (22/11/2026):** `extras_periodo`, `pagos_periodo` y `resumen_financiero` leen la API contable de Cloudbeds. Probadas con datos reales de Balta (15/11/2026). Detalle en [PLAN_MULTI_API.md](PLAN_MULTI_API.md).
 - **Sin verificar con datos reales:** el multi-hotel todavía no se probó contra Cloudbeds, porque no hay keys válidas (punto 1).
 
 ## Lo que queda por hacer
 
 ### 1. Keys nuevas (urgente; lo hace Tecnología)
+
+- [x] 22/11/2026: se creó una key de organización (tipo "Accounting & Finance", para toda la organización; anota su nombre en `REGISTRO_ACCESOS.local.md`) y se guardó para `balta`, `plaza` y `san_jose`. Lee los 8 scopes que usa el MCP. Lo que sigue en esta sección queda como referencia si hay que rotarla.
+- [ ] Comparar un día de `extras_periodo` y `pagos_periodo` con los informes de Cloudbeds ("Vista general de complementos, artículos y servicios vendidos por categoría" y el informe de pagos).
+- [ ] Pedir a Cloudbeds que habilite las consultas de la API de Insights (hoy 403). Si lo hacen, se puede cambiar la fuente de extras y pagos a Insights.
 
 - [ ] **La key actual devuelve 401** (`smoke_test.py`, 26/10/2026): fue revocada o se desactivó la cuenta que la creó. Mientras tanto, el MCP no responde.
 - [ ] Crear en Cloudbeds **una key por hotel** con una **cuenta institucional** y solo los scopes `read:hotel`, `read:dashboard`, `read:reservation`, `read:room`, `read:housekeeping` y `read:rate`. Confirmar que no tengan `write:*` ni `delete:*`.
@@ -71,7 +76,9 @@ Solo lectura (GET con allowlist) · las keys nunca se imprimen, nunca van en el 
 
 | Archivo | Para qué |
 |---|---|
-| `src/cloudbeds_mcp/server.py` | Las 14 herramientas MCP, el parámetro `hotel` y la ejecución en paralelo para "la red" |
+| `src/cloudbeds_mcp/server.py` | Las 17 herramientas MCP, el parámetro `hotel` y la ejecución en paralelo para "la red" |
+| `src/cloudbeds_mcp/finanzas.py` | Extras por rubro, pagos por medio de pago, resumen financiero y sus totales de la red |
+| `scripts/sondear_api.py` | Sondeo de la API contable e Insights con la key real (fase 0 de PLAN_MULTI_API.md) |
 | `src/cloudbeds_mcp/hotels.py` | Registro de hoteles: búsqueda por nombre, "red", clientes y límite de peticiones por key |
 | `src/cloudbeds_mcp/config.py` | `.env`, `hoteles.json` y origen de cada key |
 | `src/cloudbeds_mcp/client.py` | Cliente HTTP: allowlist, rate limit y reintentos |
