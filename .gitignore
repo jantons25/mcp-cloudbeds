@@ -18,3 +18,6 @@ logs/
 
 # Registro de accesos real (datos internos; la plantilla pública es REGISTRO_ACCESOS.md)
 REGISTRO_ACCESOS.local.md
+
+# Reportes con datos de reservas (se generan en cada PC)
+reportes/

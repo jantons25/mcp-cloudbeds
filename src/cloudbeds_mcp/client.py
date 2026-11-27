@@ -1,8 +1,10 @@
-"""Cliente HTTP de SOLO LECTURA para la API v1.3 y la API contable de Cloudbeds.
+"""Cliente HTTP para la API v1.3 y la API contable de Cloudbeds.
 
-- Solo existen `get` / `get_all` y `search_transactions`; no hay métodos de escritura.
-- Solo se permiten los endpoints de ALLOWED_ENDPOINTS (GET) y las búsquedas de
-  ALLOWED_QUERIES: POST que solo consultan, nombrados uno por uno.
+- Lectura: `get` / `get_all` y `search_transactions`. Solo los endpoints de ALLOWED_ENDPOINTS (GET)
+  y las búsquedas de ALLOWED_QUERIES (POST que solo consultan), nombrados uno por uno.
+- Escritura: solo `write`, solo los endpoints de ALLOWED_WRITES y, en cada uno, solo los campos
+  listados. Nunca cambia estado, fechas, habitaciones, tarifas, pagos ni ajustes de una reserva:
+  únicamente campos personalizados y notas. Requiere una key con scopes de escritura.
 - Token bucket a 4 req/s (el límite de Cloudbeds es 5 req/s).
 - Reintentos: 429 respeta Retry-After + jitter; 5xx/timeout con backoff exponencial.
 - Valida `success: false` aunque llegue con HTTP 200.
@@ -12,12 +14,16 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import random
+import ssl
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlencode
 
+import certifi
 import httpx
 
 from . import __version__
@@ -44,6 +50,20 @@ ALLOWED_ENDPOINTS: dict[str, str | None] = {
     "getReservationsWithRateDetails": "read:reservation",
     "getItems": "read:item",
     "getPaymentMethods": "read:payment",
+    "getCustomFields": "read:customFields",
+    "getReservationNotes": "read:reservation",
+}
+
+# Escritura (desglose de promociones de Booking): endpoint -> (método, scope, campos permitidos).
+# putReservation admite estado, fechas y habitaciones en Cloudbeds; aquí solo se deja customFields.
+ALLOWED_WRITES: dict[str, tuple[str, str, frozenset[str]]] = {
+    "postCustomField": (
+        "POST",
+        "write:customFields",
+        frozenset({"propertyID", "name", "shortcode", "applyTo", "required", "maxCharacters", "type", "displayed", "isPersonal"}),
+    ),
+    "putReservation": ("PUT", "write:reservation", frozenset({"propertyID", "reservationID", "customFields"})),
+    "postReservationNote": ("POST", "write:reservation", frozenset({"propertyID", "reservationID", "reservationNote"})),
 }
 
 # API contable: búsquedas por POST que SOLO LEEN (verificado contra la API real, nov-2026).
@@ -120,11 +140,52 @@ def _detail(body: Any) -> str | None:
     return body.get("message") or body.get("errorDetails") or body.get("error")
 
 
+def _form(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """Codifica listas y dicts con corchetes (customFields[0][customFieldName]=...), como PHP."""
+    out: list[tuple[str, str]] = []
+
+    def add(key: str, value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, dict):
+            for k, v in value.items():
+                add(f"{key}[{k}]", v)
+        elif isinstance(value, (list, tuple)):
+            for i, v in enumerate(value):
+                add(f"{key}[{i}]", v)
+        elif isinstance(value, bool):
+            out.append((key, "1" if value else "0"))
+        else:
+            out.append((key, str(value)))
+
+    for k, v in data.items():
+        add(k, v)
+    return out
+
+
 def _scope_hint(endpoint: str) -> str:
-    scope = ALLOWED_ENDPOINTS.get(endpoint) or ALLOWED_QUERIES.get(endpoint)
+    scope = (
+        ALLOWED_ENDPOINTS.get(endpoint)
+        or ALLOWED_QUERIES.get(endpoint)
+        or (ALLOWED_WRITES[endpoint][1] if endpoint in ALLOWED_WRITES else None)
+    )
     if scope:
         return f" Es probable que a la API key le falte el scope '{scope}'; los scopes no se agregan a una key existente, hay que recrearla."
     return ""
+
+
+@functools.lru_cache(maxsize=1)
+def _ssl_context() -> ssl.SSLContext:
+    """Contexto TLS con verificación activa que confía en el almacén del sistema y en certifi.
+
+    httpx usa por defecto solo certifi. Si un antivirus (p. ej. AVG/Avast "Web Shield") o un
+    proxy corporativo inspecciona HTTPS, presenta un certificado firmado por su propia raíz,
+    que está en el almacén de Windows/macOS pero no en certifi, y la conexión falla con
+    CERTIFICATE_VERIFY_FAILED. Cargando ambos se acepta lo mismo que acepta el navegador.
+    """
+    ctx = ssl.create_default_context()  # en Windows incluye el almacén de certificados del sistema
+    ctx.load_verify_locations(cafile=certifi.where())
+    return ctx
 
 
 class CloudbedsClient:
@@ -153,7 +214,11 @@ class CloudbedsClient:
         self._sleep = sleep
         self._limiter = limiter or RateLimiter(rate, sleep=sleep)
         self._http = httpx.AsyncClient(
-            base_url=base_url, headers=headers, timeout=timeout, transport=transport
+            base_url=base_url,
+            headers=headers,
+            timeout=timeout,
+            transport=transport,
+            verify=_ssl_context(),
         )
 
     async def __aenter__(self) -> CloudbedsClient:
@@ -178,6 +243,27 @@ class CloudbedsClient:
             if isinstance(value, bool):
                 clean[key] = "1" if value else "0"
         return await self._request("GET", endpoint, endpoint, params=clean)
+
+    async def write(self, endpoint: str, data: dict[str, Any]) -> Any:
+        """POST/PUT a un endpoint de ALLOWED_WRITES con solo sus campos permitidos. Sin reintentos
+        por error 5xx/timeout (una escritura repetida podría duplicar una nota)."""
+        if endpoint not in ALLOWED_WRITES:
+            raise NotAllowedError(f"El endpoint '{endpoint}' no está en la lista blanca de escritura.")
+        method, _scope, campos = ALLOWED_WRITES[endpoint]
+        extra = sorted(set(data) - campos)
+        if extra:
+            raise NotAllowedError(f"Campos no permitidos en {endpoint}: {', '.join(extra)}.")
+        body = {**data}
+        if self.settings.property_id:
+            body.setdefault("propertyID", self.settings.property_id)
+        return await self._request(
+            method,
+            endpoint,
+            endpoint,
+            content=urlencode(_form(body)),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            retry=False,
+        )
 
     async def search_transactions(
         self, filters: dict[str, Any], *, max_results: int = ACCOUNTING_MAX_RESULTS
@@ -208,12 +294,13 @@ class CloudbedsClient:
             if not token or not page:
                 return {"data": items, "truncado": False}
 
-    async def _request(self, method: str, url: str, label: str, **kwargs: Any) -> Any:
+    async def _request(self, method: str, url: str, label: str, *, retry: bool = True, **kwargs: Any) -> Any:
         """Envía la petición con límite de velocidad y reintentos, y valida la respuesta.
 
-        Solo la llaman `get` (endpoints de la lista blanca) y `search_transactions`.
+        Solo la llaman `get` (endpoints de la lista blanca), `search_transactions` y `write`
+        (sin reintentos: una escritura repetida podría duplicarse).
         """
-        attempt = 0
+        attempt = 0 if retry else MAX_RETRIES
         while True:
             await self._limiter.acquire()
             start = time.perf_counter()

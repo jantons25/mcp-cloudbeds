@@ -105,6 +105,7 @@ def test_lista_blanca_de_consultas_y_catalogos():
 
 
 def test_solo_hay_una_forma_de_hacer_post():
-    # El único método público que envía un POST es search_transactions, y su URL es fija.
+    # Métodos públicos: lectura (get, get_all, search_transactions con URL fija) y write, que solo
+    # acepta ALLOWED_WRITES (probado en test_client.py).
     publicos = {n for n in dir(CloudbedsClient) if not n.startswith("_")}
-    assert publicos == {"aclose", "get", "get_all", "search_transactions"}
+    assert publicos == {"aclose", "get", "get_all", "search_transactions", "write"}

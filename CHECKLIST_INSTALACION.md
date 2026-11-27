@@ -40,6 +40,7 @@ La hace Tecnología junto con el gerente. Tiempo estimado: 30 minutos. Marca cad
   ```
 - [ ] `scripts\agregar_hotel.py --estado` lista los 3 hoteles, cada uno con **"key: keyring (...)"**.
 - [ ] `scripts\smoke_test.py` termina con **"Prueba de humo OK en todos los hoteles"**.
+- [ ] `scripts\verificar_extras.py` muestra por sede los extras de los últimos 7 días por rubro y producto, y termina con **"Verificación de extras OK en todas las sedes consultadas"**. Si falla, a la key le falta `read:item` o `read:payment`.
 
 ## D. Claude Desktop
 

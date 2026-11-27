@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import httpx  # noqa: E402
 
+from cloudbeds_mcp.client import _ssl_context  # noqa: E402
 from cloudbeds_mcp.config import (  # noqa: E402
     ENV_PATH,
     PROJECT_ROOT,
@@ -409,7 +410,7 @@ def main() -> int:
     out(f"Sondeo fase 0 (ronda 3) · {hotel.nombre} ({hotel.alias}) · propertyID {hotel.property_id} · día {dia}")
     out("La key no se muestra. Solo se muestran conteos, totales, montos y valores de catálogo.")
     base = {"Accept": "application/json", "User-Agent": "cloudbeds-mcp-sondeo"}
-    with httpx.Client(headers={**base, "x-api-key": key}, timeout=60) as v13, httpx.Client(headers=base, timeout=60) as plano:
+    with httpx.Client(headers={**base, "x-api-key": key}, timeout=60, verify=_ssl_context()) as v13, httpx.Client(headers=base, timeout=60, verify=_ssl_context()) as plano:
         cat = sondear_v13(v13, hotel.property_id)
         sondear_contable(plano, key, hotel.property_id, dia, tz, cat)
         sondear_insights(plano, key, hotel.property_id, dia)

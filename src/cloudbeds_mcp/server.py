@@ -1,4 +1,5 @@
-"""Servidor MCP (stdio) de solo lectura para Cloudbeds.
+"""Servidor MCP (stdio) para Cloudbeds: consultas de solo lectura y una herramienta que escribe
+el desglose de Booking en campos personalizados y notas de la reserva.
 
 Ejecutar: python -m cloudbeds_mcp.server
 IMPORTANTE: nada se escribe a stdout (lo usa JSON-RPC); los logs van a stderr.
@@ -21,6 +22,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field, TypeAdapter, ValidationError
 
 from . import aggregations as agg
+from . import desglose as dg
 from . import finanzas as fin
 from . import formatters as fmt
 from .client import CloudbedsClient
@@ -1142,9 +1144,102 @@ async def hoteles(
     return fmt.to_json(out)
 
 
+# --- Escritura: desglose de promociones de Booking en la reserva -------------------------------
+
+WRITE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
+
+CAMPOS_BOOKING = dg.CAMPOS_BOOKING
+MAX_CARACTERES_CAMPO = dg.MAX_CARACTERES_CAMPO
+
+
+@mcp.tool(
+    title="Registrar desglose de Booking",
+    description=(
+        "ESCRIBE en Cloudbeds el desglose de precio de una reserva de Booking: lo guarda en campos "
+        "personalizados de la reserva (base_cb, original, promo, genius, subtotal, comision, neto; "
+        "texto de hasta 60 caracteres cada uno) y, si se indica, agrega una nota. No cambia estado, "
+        "fechas, habitaciones, montos ni pagos. Con confirmar=false (por defecto) solo muestra lo que "
+        "escribiría: muéstraselo al usuario y vuelve a llamar con confirmar=true SOLO si lo aprueba. "
+        "Si los campos no existen en el hotel, los crea (solo visibles en la reserva)."
+    ),
+    annotations=WRITE,
+    structured_output=False,
+)
+async def registrar_desglose_booking(
+    reservation_id: Annotated[
+        str, Field(description="ID de la reserva en Cloudbeds.", min_length=1, max_length=64)
+    ],
+    valores: Annotated[
+        dict[str, str],
+        Field(description="Clave -> texto. Claves: " + ", ".join(CAMPOS_BOOKING) + "."),
+    ],
+    hotel: HotelUno = None,
+    nota: Annotated[
+        str | None, Field(description="Nota con el desglose paso a paso (opcional).", max_length=4000)
+    ] = None,
+    confirmar: Annotated[bool, Field(description="true = escribe en Cloudbeds; false = vista previa.")] = False,
+) -> str:
+    desconocidas = sorted(set(valores) - set(CAMPOS_BOOKING))
+    if desconocidas:
+        return _error(CloudbedsError(
+            f"Claves no válidas: {', '.join(desconocidas)}. Usa: {', '.join(CAMPOS_BOOKING)}."
+        ))
+    largos = [k for k, v in valores.items() if len(v) > MAX_CARACTERES_CAMPO]
+    if largos:
+        return _error(CloudbedsError(f"Superan {MAX_CARACTERES_CAMPO} caracteres: {', '.join(largos)}."))
+    if not valores and not (nota and nota.strip()):
+        return _error(CloudbedsError("No hay nada que escribir: indica valores o una nota."))
+    try:
+        client = _get_client(hotel)
+        rid = reservation_id.strip()
+        if not confirmar:
+            return _out(client, {
+                "vista_previa": True,
+                "reserva": rid,
+                "campos": {CAMPOS_BOOKING[k][1]: v for k, v in valores.items()},
+                "nota": nota,
+                "aviso": "No se escribió nada. Repite con confirmar=true si el usuario lo aprueba.",
+            })
+        pid = client.settings.property_id
+        body = await client.get("getCustomFields", {"propertyID": pid})
+        existentes = {f.get("shortcode") for f in body.get("data") or []}
+        creados = []
+        for clave in valores:
+            shortcode, nombre = CAMPOS_BOOKING[clave]
+            if shortcode not in existentes:
+                await client.write("postCustomField", {
+                    "name": nombre, "shortcode": shortcode, "applyTo": "reservation", "required": False,
+                    "maxCharacters": MAX_CARACTERES_CAMPO, "type": "input", "displayed": ["reservation"],
+                    "isPersonal": False,
+                })
+                creados.append(nombre)
+        out: dict[str, Any] = {"reserva": rid, "campos_creados": creados}
+        if valores:
+            await client.write("putReservation", {
+                "reservationID": rid,
+                "customFields": [
+                    {"customFieldName": CAMPOS_BOOKING[k][0], "customFieldValue": v} for k, v in valores.items()
+                ],
+            })
+            data = (await client.get("getReservation", {"propertyID": pid, "reservationID": rid})).get("data") or {}
+            out["campos_en_cloudbeds"] = {
+                f.get("customFieldName"): f.get("customFieldValue")
+                for f in data.get("customFields") or []
+                if str(f.get("shortcode", "")).startswith("bk_")
+            }
+        if nota and nota.strip():
+            r = await client.write("postReservationNote", {"reservationID": rid, "reservationNote": nota.strip()})
+            out["nota_id"] = r.get("reservationNoteID")
+        return _out(client, out)
+    except _ERRORS as exc:
+        return _error(exc)
+
+
 def main() -> None:
     configure_logging()
-    logger.info("Iniciando servidor MCP de Cloudbeds (stdio, solo lectura)")
+    logger.info("Iniciando servidor MCP de Cloudbeds (stdio)")
     mcp.run("stdio")
 
 

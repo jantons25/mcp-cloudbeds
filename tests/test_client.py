@@ -205,9 +205,46 @@ async def test_endpoint_fuera_de_lista_blanca(client, api):
     assert route.call_count == 0
 
 
-def test_no_existen_metodos_de_escritura(settings):
+def test_no_existen_metodos_de_escritura_genericos(settings):
     for name in ("post", "put", "patch", "delete"):
         assert not hasattr(CloudbedsClient, name)
+
+
+async def test_write_put_reservation_solo_campos_personalizados(client, api):
+    route = api.put("putReservation").respond(200, json={"success": True, "data": {}})
+    await client.write("putReservation", {
+        "reservationID": "99",
+        "customFields": [{"customFieldName": "bk_neto", "customFieldValue": "US$ 25.82"}],
+    })
+    req = route.calls.last.request
+    assert req.method == "PUT"
+    assert req.headers["Content-Type"] == "application/x-www-form-urlencoded"
+    form = dict(httpx.QueryParams(req.content.decode()))
+    assert form == {
+        "reservationID": "99",
+        "customFields[0][customFieldName]": "bk_neto",
+        "customFields[0][customFieldValue]": "US$ 25.82",
+        "propertyID": "12345",
+    }
+
+
+async def test_write_rechaza_campos_y_endpoints_peligrosos(client, api):
+    route = api.route()
+    for data in ({"reservationID": "1", "status": "canceled"}, {"reservationID": "1", "rooms": []},
+                 {"reservationID": "1", "checkoutDate": "2026-12-01"}):
+        with pytest.raises(NotAllowedError):
+            await client.write("putReservation", data)
+    for endpoint in ("postReservation", "postPayment", "postAdjustment", "deleteReservationNote"):
+        with pytest.raises(NotAllowedError):
+            await client.write(endpoint, {})
+    assert route.call_count == 0
+
+
+async def test_write_no_reintenta_error_5xx(client, api):
+    route = api.post("postReservationNote").respond(500, json={})
+    with pytest.raises(CloudbedsError):
+        await client.write("postReservationNote", {"reservationID": "1", "reservationNote": "x"})
+    assert route.call_count == 1
 
 
 def test_https_obligatorio(settings):
@@ -275,3 +312,20 @@ async def test_paginacion_concurrente_una_sola_pagina(client, api):
     route.side_effect = _page_responder(40)
     result = await client.get_all("getReservationsWithRateDetails", concurrency=4)
     assert len(result["data"]) == 40 and route.call_count == 1
+
+
+def test_ssl_context_verifica_y_suma_certifi():
+    """El contexto TLS nunca desactiva la verificación y suma las raíces de certifi a las del sistema."""
+    import ssl
+
+    import certifi
+
+    from cloudbeds_mcp.client import _ssl_context
+
+    ctx = _ssl_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+    base = ssl.create_default_context()
+    base.load_verify_locations(cafile=certifi.where())
+    assert ctx.cert_store_stats()["x509_ca"] >= base.cert_store_stats()["x509_ca"] > 0
+    assert _ssl_context() is ctx  # se arma una sola vez
